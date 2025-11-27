@@ -105,6 +105,7 @@
 
   <script type="text/babel">
     // Helper: claim smallest available numeric id atomically (reuses gaps) - MOVED OUTSIDE COMPONENT
+    // Returns a NUMBER (not a string) so it can be stored directly in the DB as an integer
     const claimSmallestNumericId = async (baseNode) => {
       if (!window.dbGet || !window.dbRef || !window.dbRunTransaction) throw new Error('DB helpers missing');
       const nodeRef = window.dbRef(window.db, baseNode);
@@ -121,7 +122,7 @@
               if (current) return; // already claimed
               return { reservedAt: Date.now() };
             });
-            if (tx && tx.committed) return String(candidate);
+            if (tx && tx.committed) return candidate; // Return NUMBER, not string
           } catch(e) {}
         }
       }
@@ -132,7 +133,7 @@
         if (current) return; // someone else claimed
         return { reservedAt: Date.now() };
       });
-      return String(newId);
+      return newId; // Return NUMBER, not string
     };
     
     const TricycleManagement = () => {
@@ -207,6 +208,12 @@
           let plate = a.plate || a.TricycleNumber || '';
 
           try {
+            // If application references a canonical user, prefer that user's data
+            if (a.UserID && rawUsers && rawUsers[a.UserID]) {
+              const userRecApp = rawUsers[a.UserID];
+              name = [userRecApp.Firstname, userRecApp.Middlename, userRecApp.Lastname].filter(Boolean).join(' ') || name;
+              contact = userRecApp.MobileNumber || contact;
+            }
             const driverRefId = a.DriverID || a.driverId || a.DriverId || null;
             if (driverRefId && rawDrivers && rawDrivers[driverRefId]) {
               const drv = rawDrivers[driverRefId];
@@ -353,11 +360,21 @@
         // prefer canonical driver/user values so edits can be persisted back to drivers/users.
         const app = applicants[index] || {};
         const base = { ...app };
+        
+        // Ensure UserID is always captured (critical for saving back to applications/)
+        if (!base.UserID) {
+          // Try to find UserID from rawApplications using the application key
+          if (app.id && rawApplications && rawApplications[app.id]) {
+            base.UserID = rawApplications[app.id].UserID || '';
+          }
+        }
+        
         try {
           if (app.id && typeof app.id === 'string' && app.id.startsWith('drv-')) {
             const drvId = app.id.replace(/^drv-/, '');
             const drv = rawDrivers && rawDrivers[drvId];
               if (drv) {
+              base.UserID = drv.UserID || base.UserID || '';
               base.license = drv.LicenseNumber || drv.license || base.license || '';
               base.plate = drv.TricycleNumber || drv.tricycle || base.plate || '';
               base.franchiseExpiry = drv.FranchiseExpiry || drv.franchiseExpiry || base.franchiseExpiry || '';
@@ -578,80 +595,91 @@
           // Default: write to applications/<id>
           // Only store essential fields in applications/ (reference users/ for name, email, phone)
           const appRef = window.dbRef(window.db, `applications/${selected.id}`);
+          const userIdVal = selected.UserID || (applicants && applicants[selectedIndex] && applicants[selectedIndex].UserID) || '';
           const appPayload = {
-            UserID: selected.UserID || (applicants && applicants[selectedIndex] && applicants[selectedIndex].UserID) || '',
-            ApplicationStatus: appStatus,
-            LicenseNumber: formattedLicense || selected.license || '',
-            TricycleNumber: selected.plate || ''
+            UserID: userIdVal ? parseInt(userIdVal, 10) : null,
+            ApplicationStatus: appStatus
           };
           window.dbUpdate(appRef, appPayload).then(async () => {
             const updatedApplicants = [...applicants];
             updatedApplicants[selectedIndex] = { ...updatedApplicants[selectedIndex], ApplicationStatus: appStatus, status: appStatus };
             setApplicants(updatedApplicants);
 
-            // Find matching drivers by license and sync their ApplicationStatus to match the application
+            // Find matching drivers by UserID/DriverID (license fallback) and sync their ApplicationStatus to match the application
             try {
               const normalizeStr = s => (s||'').toString().toUpperCase().replace(/[^A-Z0-9]/g, '');
-              const appNorm = normalizeStr(payload.license || selected.license || '');
-              if (appNorm) {
-                const updatedRawDrivers = { ...(rawDrivers || {}) };
-                for (const [drvKey, drvRec] of Object.entries(rawDrivers || {})) {
-                  const drvNorm = normalizeStr(drvRec.LicenseNumber || drvRec.license || '');
-                  if (drvNorm && drvNorm === appNorm) {
-                    try {
-                      // Compute driver update payload based on new application status
-                      const driverUpdate = { ApplicationStatus: appStatus };
-                      if (appStatus === 'EXPIRED') {
-                        driverUpdate.IsActive = false;
-                        driverUpdate.Status = 'Inactive';
-                      } else {
-                        driverUpdate.IsActive = true;
-                        driverUpdate.Status = 'Active';
-                      }
+              const updatedRawDrivers = { ...(rawDrivers || {}) };
 
-                      await window.dbUpdate(window.dbRef(window.db, `drivers/${drvKey}`), driverUpdate);
+              // Fetch fresh application record to determine canonical UserID/DriverID (if any)
+              const appsSnap2 = await window.dbGet(window.dbRef(window.db, 'applications'));
+              const appsVal2 = appsSnap2.val() || {};
+              const appRec = appsVal2[selected.id] || {};
+              const appUserId = appRec.UserID || appPayload.UserID || '';
+              const appDriverId = appRec.DriverID || appPayload.DriverID || '';
+              const appLicenseNorm = normalizeStr(selected.license || payload.license || '');
 
-                      // Update local rawDrivers so UI updates immediately
-                      updatedRawDrivers[drvKey] = { ...(drvRec || {}), ...driverUpdate };
+              for (const [drvKey, drvRec] of Object.entries(rawDrivers || {})) {
+                try {
+                  const drvUserId = drvRec && drvRec.UserID;
+                  const drvLicenseNorm = normalizeStr(drvRec.LicenseNumber || drvRec.license || '');
 
-                      // notify linked user
-                      const userId = drvRec && drvRec.UserID;
-                      if (userId) {
-                        const notifRef = window.dbRef(window.db, `users/${userId}/notifications/${Date.now()}`);
-                        await window.dbSet(notifRef, {
-                          type: 'APPLICATION_STATUS_UPDATE',
-                          message: `Your application status is now ${appStatus}`,
-                          createdAt: Date.now(),
-                          seen: false
-                        });
-                      }
-                    } catch (e) {
-                      console.warn('Failed to sync driver for application status change', e);
-                    }
+                  const matches = (appUserId && drvUserId && appUserId === drvUserId)
+                    || (appDriverId && appDriverId === drvKey)
+                    || (appLicenseNorm && drvLicenseNorm && drvLicenseNorm === appLicenseNorm);
+
+                  if (!matches) continue;
+
+                  // Compute driver update payload based on new application status
+                  const driverUpdate = { ApplicationStatus: appStatus };
+                  if (appStatus === 'EXPIRED') {
+                    driverUpdate.IsActive = false;
+                    driverUpdate.Status = 'Inactive';
+                  } else {
+                    driverUpdate.IsActive = true;
+                    driverUpdate.Status = 'Active';
                   }
+
+                  await window.dbUpdate(window.dbRef(window.db, `drivers/${drvKey}`), driverUpdate);
+
+                  // Update local rawDrivers so UI updates immediately
+                  updatedRawDrivers[drvKey] = { ...(drvRec || {}), ...driverUpdate };
+
+                  // notify linked user
+                  const userId = drvRec && drvRec.UserID;
+                  if (userId) {
+                    const notifRef = window.dbRef(window.db, `users/${userId}/notifications/${Date.now()}`);
+                    await window.dbSet(notifRef, {
+                      type: 'APPLICATION_STATUS_UPDATE',
+                      message: `Your application status is now ${appStatus}`,
+                      createdAt: Date.now(),
+                      seen: false
+                    });
+                  }
+                } catch (e) {
+                  console.warn('Failed to sync driver for application status change', e);
                 }
-                // apply local update once
-                try { setRawDrivers(updatedRawDrivers); } catch(e) {}
-                // Also force a fresh read to ensure listeners and other clients reconcile quickly
-                try {
-                  const driversSnap = await window.dbGet(window.dbRef(window.db, 'drivers'));
-                  const drvVal = driversSnap.val() || {};
-                  setRawDrivers(drvVal);
-                  try { console.debug('Refreshed drivers after app update', Object.keys(drvVal).length); } catch(e) {}
-                } catch(e) { console.warn('Failed to refresh drivers after app update', e); }
-                // Refresh applications snapshot too so recompute runs and UI updates immediately
-                try {
-                  const appsSnap2 = await window.dbGet(window.dbRef(window.db, 'applications'));
-                  const appsVal2 = appsSnap2.val() || {};
-                  setRawApplications(appsVal2);
-                  try { console.debug('Refreshed applications after app update', Object.keys(appsVal2).length); } catch(e) {}
-                } catch(e) { console.warn('Failed to refresh applications after app update', e); }
               }
+
+              // apply local update once
+              try { setRawDrivers(updatedRawDrivers); } catch(e) {}
+              // Also force a fresh read to ensure listeners and other clients reconcile quickly
+              try {
+                const driversSnap = await window.dbGet(window.dbRef(window.db, 'drivers'));
+                const drvVal = driversSnap.val() || {};
+                setRawDrivers(drvVal);
+                try { console.debug('Refreshed drivers after app update', Object.keys(drvVal).length); } catch(e) {}
+              } catch(e) { console.warn('Failed to refresh drivers after app update', e); }
+              // Refresh applications snapshot too so recompute runs and UI updates immediately
+              try {
+                const appsSnap3 = await window.dbGet(window.dbRef(window.db, 'applications'));
+                const appsVal3 = appsSnap3.val() || {};
+                setRawApplications(appsVal3);
+                try { console.debug('Refreshed applications after app update', Object.keys(appsVal3).length); } catch(e) {}
+              } catch(e) { console.warn('Failed to refresh applications after app update', e); }
+
             } catch(e) {
               console.warn('Error syncing to drivers node after application update', e);
-            }
-
-            window.showAlert("Changes saved for " + selected.name, 'success');
+            }            window.showAlert("Changes saved for " + selected.name, 'success');
             closeModal();
           }).catch(err => {
             console.error('Error updating application:', err);
@@ -707,6 +735,7 @@
             IsActive: true
           };
 
+          // userId is now a NUMBER from claimSmallestNumericId, use it directly
           const userRef = window.dbRef(window.db, `users/${userId}`);
           await window.dbSet(userRef, userPayload);
 
@@ -714,7 +743,7 @@
 
           // Create driver record
           const driverPayload = {
-            UserID: userId,
+            UserID: userId, // Store as number, not string
             LicenseNumber: selected.license || '',
             TricycleNumber: selected.plate || '',
             ApplicationStatus: 'APPROVED',
@@ -722,21 +751,18 @@
             CreatedAt: new Date().toISOString()
           };
 
+          // driverId is now a NUMBER from claimSmallestNumericId, use it directly
           const driverRef = window.dbRef(window.db, `drivers/${driverId}`);
           await window.dbSet(driverRef, driverPayload);
 
-          // Mark allocation entries as claimed
-          try { await window.dbSet(window.dbRef(window.db, `allocations/users/${userId}`), {claimedBy: userId, ts: Date.now()}); } catch(e) {}
-          try { await window.dbSet(window.dbRef(window.db, `allocations/drivers/${driverId}`), {claimedBy: driverId, ts: Date.now()}); } catch(e) {}
+          // (no explicit allocation writes here — reservation is handled inside claimSmallestNumericId)
 
           // Update application status with minimal fields (only essential data, no duplicates from users/)
           const appRef = window.dbRef(window.db, `applications/${selected.id}`);
           const payload = {
-            UserID: userId,
-            DriverID: driverId,
+            UserID: userId, // Store as number, not string
+            DriverID: driverId, // Store as number, not string
             ApplicationStatus: 'APPROVED',
-            LicenseNumber: selected.license || '',
-            TricycleNumber: selected.plate || '',
             CreatedAt: new Date().toISOString()
           };
 
@@ -1195,7 +1221,7 @@
         }
         setIsSaving(true);
         try {
-          const userId = await claimSmallestNumericId('users');
+          // Use push() keys for quick-add to avoid creating allocations entries
           // split name
           const parts = (name || '').trim().split(/\s+/).filter(Boolean);
           const firstname = parts[0] || '';
@@ -1211,18 +1237,22 @@
             CreatedAt: new Date().toISOString(),
             IsActive: true
           };
-          await window.dbSet(window.dbRef(window.db, `users/${userId}`), userObj);
-          try { await window.dbSet(window.dbRef(window.db, `allocations/users/${userId}`), { claimedBy: userId, ts: Date.now() }); } catch(e) {}
+          // create user with numeric id (claim smallest available) instead of a push key
+          // userId is now a NUMBER from claimSmallestNumericId, use it directly
+          const userId = await claimSmallestNumericId('users');
+          const userRef = window.dbRef(window.db, `users/${userId}`);
+          await window.dbSet(userRef, userObj);
 
-          // Create an application entry with only essential fields (reference users/ for name/email/phone)
+          // Create an application entry with a numeric id (claim smallest available)
+          // appId is now a NUMBER from claimSmallestNumericId, use it directly
           const appId = await claimSmallestNumericId('applications');
+          const appRef = window.dbRef(window.db, `applications/${appId}`);
           const appObj = {
-            UserID: userId,
+            UserID: userId, // Store as number, not string
             ApplicationStatus: 'TO REVIEW',
             CreatedAt: new Date().toISOString()
           };
-          await window.dbSet(window.dbRef(window.db, `applications/${appId}`), appObj);
-          try { await window.dbSet(window.dbRef(window.db, `allocations/applications/${appId}`), { claimedBy: appId, ts: Date.now() }); } catch(e) {}
+          await window.dbSet(appRef, appObj);
 
           window.showAlert('Driver applicant added and marked as TO REVIEW', 'success');
           onClose();

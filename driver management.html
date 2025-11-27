@@ -698,7 +698,7 @@
                 return { reservedAt: Date.now() };
               });
               if (tx && tx.committed) {
-                return String(candidate);
+                return candidate; // Return NUMBER, not string
               }
             } catch (e) {
               // race, try next
@@ -713,7 +713,7 @@
           if (current) return; // if someone else claimed, we'll fall through
           return { reservedAt: Date.now() };
         });
-        return String(newId);
+        return newId; // Return NUMBER, not string
       };
 
         // Modal component for importing approved applications (defined inside DriverManagement so it can access helpers)
@@ -765,7 +765,6 @@
                   IsActive: true
                 };
                 await window.dbSet(window.dbRef(window.db, `users/${userId}`), userData);
-                try { await window.dbSet(window.dbRef(window.db, `allocations/users/${userId}`), { claimedBy: userId, ts: Date.now() }); } catch(e) {}
               }
 
               // Claim driver id and create driver record
@@ -779,7 +778,6 @@
                 CreatedAt: new Date().toISOString()
               };
               await window.dbSet(window.dbRef(window.db, `drivers/${newDriverId}`), driverData);
-              try { await window.dbSet(window.dbRef(window.db, `allocations/drivers/${newDriverId}`), { claimedBy: newDriverId, ts: Date.now() }); } catch(e) {}
 
               // Update application to link driver
               try {
@@ -935,8 +933,7 @@
           await window.dbSet(driverRef, driverData);
 
           // Mark allocation entries with the created id (optional) so they show claimed
-          try { await window.dbSet(window.dbRef(window.db, `allocations/users/${newUserId}`), {claimedBy: newUserId, ts: Date.now()}); } catch(e) {}
-          try { await window.dbSet(window.dbRef(window.db, `allocations/drivers/${newDriverId}`), {claimedBy: newDriverId, ts: Date.now()}); } catch(e) {}
+          // (no explicit allocation writes here — reservation is handled inside claimSmallestNumericId)
 
           setShowAddModal(false);
           window.showAlert(`Driver ${newDriver.name} added successfully (ID: ${newDriverId}) to Firebase!`, 'success');
