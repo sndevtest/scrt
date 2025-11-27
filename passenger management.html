@@ -159,8 +159,8 @@
 
         // Build passengers from `passengers` node
         const passengersArr = Object.entries(rawPassengers || {})
-          // exclude passenger entries that reference a missing or deactivated user
-          .filter(([key, p]) => p && p.UserID && rawUsers && rawUsers[p.UserID] && rawUsers[p.UserID].IsActive !== false && !rawUsers[p.UserID].DeletedAt)
+          // exclude passenger entries that reference a missing user, but INCLUDE soft-deleted ones
+          .filter(([key, p]) => p && p.UserID && rawUsers && rawUsers[p.UserID])
           .map(([key, p]) => {
           const user = rawUsers && rawUsers[p.UserID];
           const name = makeFullName(user);
@@ -182,10 +182,8 @@
         const existingUserIds = new Set((passengersArr || []).map(p => String(p.userId)));
         Object.entries(rawUsers || {}).forEach(([userId, userObj]) => {
           try {
-            // skip users that are inactive/deleted, not in the passenger role, or already present
-            if (!userObj || userObj.IsActive === false || userObj.DeletedAt) return;
-            if (String(userObj.Role || '').toLowerCase() !== 'passenger') return;
-            if (existingUserIds.has(String(userId))) return;
+            // skip users not in the passenger role or already present; but INCLUDE soft-deleted passengers
+            if (!userObj || String(userObj.Role || '').toLowerCase() !== 'passenger' || existingUserIds.has(String(userId))) return;
 
             const name = makeFullName(userObj);
             const initials = name.split(" ").map(n => n[0]).join("").slice(0, 2).toUpperCase();
