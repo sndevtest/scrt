@@ -624,7 +624,24 @@
     const approvedApplications = (() => {
       try {
         const apps = rawApplications || {};
-        const appsArr = Object.entries(apps).map(([id, a]) => ({ id, ...a }));
+        const appsArr = Object.entries(apps).map(([id, a]) => {
+          // Enrich with user data from users/ if available
+          const userId = a.UserID;
+          const user = userId && rawUsers && rawUsers[userId];
+          const name = user ? [user.Firstname, user.Middlename, user.Lastname].filter(Boolean).join(' ') : (a.Name || a.ApplicantName || 'Unnamed');
+          const phone = user ? user.MobileNumber : (a.MobileNumber || a.Contact || a.Mobile || '');
+          return {
+            id,
+            ...a,
+            // Add resolved user data for display
+            Name: name,
+            Firstname: user ? user.Firstname : a.Firstname,
+            Middlename: user ? user.Middlename : a.Middlename,
+            Lastname: user ? user.Lastname : a.Lastname,
+            MobileNumber: phone,
+            UserID: userId
+          };
+        });
         const approved = appsArr.filter(a => (a.ApplicationStatus || '').toString().toLowerCase() === 'approved');
         const filtered = approved.filter(a => {
           // Filter out applications where user has been deleted

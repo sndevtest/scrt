@@ -231,12 +231,17 @@
 
           let displayStatus = status;
           try {
-            // Show "ADDED" when ApplicationStatus is APPROVED (for approved drivers)
-            // Otherwise show the actual status (EXPIRED, TO REVIEW, REJECTED, etc.)
+            // Show "ADDED" only if ApplicationStatus is APPROVED AND the driver record exists in drivers/
+            // Otherwise show the actual status (EXPIRED, TO REVIEW, REJECTED, APPROVED, etc.)
             if (status === 'APPROVED') {
-              displayStatus = 'ADDED';
+              // Check if a corresponding driver record exists
+              const driverRefId = a.DriverID || a.driverId || a.DriverId || null;
+              const driverExists = driverRefId && rawDrivers && rawDrivers[driverRefId];
+              if (driverExists) {
+                displayStatus = 'ADDED';
+              }
+              // Otherwise keep status as APPROVED (not ADDED)
             }
-            // Otherwise keep the real status as-is
           } catch(e) {}
 
           return {
@@ -255,9 +260,10 @@
         }).filter(Boolean);
 
         const existingLicenses = new Set(items.map(a => (a.license || '').toUpperCase().replace(/[^A-Z0-9]/g, '').toLowerCase()));
+        // Include ALL drivers (including soft-deleted/inactive) so they appear in the applicants list
         const driversOnly = Object.entries(rawDrivers || {}).filter(([drvId, drv]) => {
           if (!drv) return false;
-          if (drv.IsActive === false || drv.DeletedAt) return false;
+          // Include drivers regardless of IsActive or DeletedAt status
           if (drv.UserID && (!rawUsers[drv.UserID] || rawUsers[drv.UserID].IsActive === false || rawUsers[drv.UserID].DeletedAt)) return false;
           const drvLicense = drv.LicenseNumber || drv.license || '';
           const norm = (drvLicense || '').toUpperCase().replace(/[^A-Z0-9]/g, '').toLowerCase();
@@ -267,7 +273,7 @@
         try {
           for (const [drvId, drv] of driversOnly) {
             if (!drv) continue;
-            if (drv.IsActive === false || drv.DeletedAt) continue;
+            // Include soft-deleted drivers so they still appear in the list
             if (drv.UserID && !rawUsers[drv.UserID]) continue;
             const drvLicense = drv.LicenseNumber || drv.license || '';
             const norm = (drvLicense || '').toUpperCase().replace(/[^A-Z0-9]/g, '').toLowerCase();
@@ -368,6 +374,19 @@
             base.UserID = rawApplications[app.id].UserID || '';
           }
         }
+        
+        // Prefill license and tricycle from applications record if available
+        try {
+          if (app.id && rawApplications && rawApplications[app.id]) {
+            const appRec = rawApplications[app.id];
+            if (appRec.LicenseNumber) {
+              base.license = appRec.LicenseNumber;
+            }
+            if (appRec.TricycleNumber) {
+              base.plate = appRec.TricycleNumber;
+            }
+          }
+        } catch (e) {}
         
         try {
           if (app.id && typeof app.id === 'string' && app.id.startsWith('drv-')) {
@@ -516,7 +535,12 @@
                   const appLicense = appRec.LicenseNumber || appRec.license || appRec.licenseNumber || '';
                   if (normalizeStr(appLicense) === drvNorm) {
                     try {
-                      await window.dbUpdate(window.dbRef(window.db, `applications/${appKey}`), { ApplicationStatus: appStatus, status: appStatus });
+                      await window.dbUpdate(window.dbRef(window.db, `applications/${appKey}`), { 
+                        ApplicationStatus: appStatus, 
+                        status: appStatus,
+                        LicenseNumber: payload.license || '',
+                        TricycleNumber: payload.plate || ''
+                      });
                     } catch (e) {
                       console.warn('Failed to update application', appKey, e);
                     }
@@ -593,16 +617,24 @@
           }
 
           // Default: write to applications/<id>
-          // Only store essential fields in applications/ (reference users/ for name, email, phone)
+          // Store essential fields in applications/ (reference users/ for name, email, phone)
           const appRef = window.dbRef(window.db, `applications/${selected.id}`);
           const userIdVal = selected.UserID || (applicants && applicants[selectedIndex] && applicants[selectedIndex].UserID) || '';
           const appPayload = {
             UserID: userIdVal ? parseInt(userIdVal, 10) : null,
-            ApplicationStatus: appStatus
+            ApplicationStatus: appStatus,
+            LicenseNumber: formattedLicense || selected.license || '', // Store license in applications
+            TricycleNumber: selected.plate || '' // Store tricycle in applications
           };
           window.dbUpdate(appRef, appPayload).then(async () => {
             const updatedApplicants = [...applicants];
-            updatedApplicants[selectedIndex] = { ...updatedApplicants[selectedIndex], ApplicationStatus: appStatus, status: appStatus };
+            updatedApplicants[selectedIndex] = { 
+              ...updatedApplicants[selectedIndex], 
+              ApplicationStatus: appStatus, 
+              status: appStatus,
+              license: formattedLicense || selected.license || '',
+              plate: selected.plate || ''
+            };
             setApplicants(updatedApplicants);
 
             // Find matching drivers by UserID/DriverID (license fallback) and sync their ApplicationStatus to match the application
@@ -763,6 +795,8 @@
             UserID: userId, // Store as number, not string
             DriverID: driverId, // Store as number, not string
             ApplicationStatus: 'APPROVED',
+            LicenseNumber: selected.license || '', // Include license from application
+            TricycleNumber: selected.plate || '', // Include tricycle from application
             CreatedAt: new Date().toISOString()
           };
 
@@ -1250,6 +1284,8 @@
           const appObj = {
             UserID: userId, // Store as number, not string
             ApplicationStatus: 'TO REVIEW',
+            LicenseNumber: '', // Initially blank, user will fill in later
+            TricycleNumber: '', // Initially blank, user will fill in later
             CreatedAt: new Date().toISOString()
           };
           await window.dbSet(appRef, appObj);
