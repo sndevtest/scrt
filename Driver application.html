@@ -215,8 +215,8 @@
               contact = userRecApp.MobileNumber || contact;
             }
             const driverRefId = a.DriverID || a.driverId || a.DriverId || null;
-            if (driverRefId && rawDrivers && rawDrivers[driverRefId]) {
-              const drv = rawDrivers[driverRefId];
+            if (driverRefId && rawDrivers && rawDrivers[String(driverRefId)]) {
+              const drv = rawDrivers[String(driverRefId)];
               license = drv.LicenseNumber || drv.license || license;
               plate = drv.TricycleNumber || drv.tricycle || plate;
               const userRec = rawUsers && rawUsers[drv.UserID];
@@ -236,7 +236,7 @@
             if (status === 'APPROVED') {
               // Check if a corresponding driver record exists
               const driverRefId = a.DriverID || a.driverId || a.DriverId || null;
-              const driverExists = driverRefId && rawDrivers && rawDrivers[driverRefId];
+              const driverExists = driverRefId && rawDrivers && rawDrivers[String(driverRefId)];
               if (driverExists) {
                 displayStatus = 'ADDED';
               }
@@ -246,6 +246,7 @@
 
           return {
             id: key,
+            userId: a.UserID || null,
             name,
             contact,
             license,
@@ -260,9 +261,14 @@
         }).filter(Boolean);
 
         const existingLicenses = new Set(items.map(a => (a.license || '').toUpperCase().replace(/[^A-Z0-9]/g, '').toLowerCase()));
+        // Track UserIDs already added to avoid duplicates (same person appearing in both applications and drivers)
+        const addedUserIds = new Set(items.map(a => a.userId).filter(Boolean));
+        
         // Include ALL drivers (including soft-deleted/inactive) so they appear in the applicants list
         const driversOnly = Object.entries(rawDrivers || {}).filter(([drvId, drv]) => {
           if (!drv) return false;
+          // Skip if this UserID was already added from applications (same person, different record type)
+          if (drv.UserID && addedUserIds.has(drv.UserID)) return false;
           // Include drivers regardless of IsActive or DeletedAt status
           if (drv.UserID && (!rawUsers[drv.UserID] || rawUsers[drv.UserID].IsActive === false || rawUsers[drv.UserID].DeletedAt)) return false;
           const drvLicense = drv.LicenseNumber || drv.license || '';
@@ -305,7 +311,15 @@
           }
         } catch(e) { console.warn('Error merging drivers into applicants list', e); }
 
-        setApplicants(items);
+        // Deduplicate by ID to prevent showing same driver twice
+        const seenIds = new Set();
+        const deduplicatedItems = items.filter(item => {
+          if (seenIds.has(item.id)) return false;
+          seenIds.add(item.id);
+          return true;
+        });
+
+        setApplicants(deduplicatedItems);
       }, [rawApplications, rawDrivers, rawUsers]);
 
       // Date formatting helpers: display without 'T' and without milliseconds/Z
@@ -353,7 +367,7 @@
         return (value||'').toString().toUpperCase().replace(/[^A-Z0-9]/g, '');
       };
 
-      // Helper: strip +63 prefix for display in input field
+      // Helper: strip +63 prefix for display
       const stripPhonePrefix = (phone) => {
         if (!phone) return '';
         const str = phone.toString();
@@ -391,7 +405,7 @@
         try {
           if (app.id && typeof app.id === 'string' && app.id.startsWith('drv-')) {
             const drvId = app.id.replace(/^drv-/, '');
-            const drv = rawDrivers && rawDrivers[drvId];
+            const drv = rawDrivers && rawDrivers[String(drvId)];
               if (drv) {
               base.UserID = drv.UserID || base.UserID || '';
               base.license = drv.LicenseNumber || drv.license || base.license || '';
@@ -409,13 +423,29 @@
           }
         } catch (e) {}
 
-        // Normalize ApplicationStatus: ensure it's set to the canonical field name for consistency
-        if (!base.ApplicationStatus && base.status) {
-          base.ApplicationStatus = base.status;
+        // Prefer canonical ApplicationStatus from the applications/ node when available
+        // This prevents mixing the computed display status (e.g. 'ADDED') into the stored field.
+        try {
+          if (base.id && rawApplications && rawApplications[base.id]) {
+            const appRec = rawApplications[base.id];
+            base.ApplicationStatus = (appRec.ApplicationStatus || appRec.status || base.ApplicationStatus || 'TO REVIEW').toString().toUpperCase();
+          } else if (!base.ApplicationStatus) {
+            base.ApplicationStatus = (base.status || 'TO REVIEW').toString().toUpperCase();
+          }
+        } catch (e) {
+          if (!base.ApplicationStatus) base.ApplicationStatus = 'TO REVIEW';
         }
-        if (!base.ApplicationStatus) {
-          base.ApplicationStatus = 'TO REVIEW';
-        }
+        // Compute a display-only status (ADDED) when ApplicationStatus is APPROVED and a driver record exists.
+        try {
+          let computedDisplay = base.ApplicationStatus || 'TO REVIEW';
+          if ((computedDisplay || '').toString().toUpperCase() === 'APPROVED') {
+            const appRec = (rawApplications && rawApplications[base.id]) || {};
+            const driverRefId = appRec.DriverID || appRec.driverId || appRec.DriverId || null;
+            const driverExists = (driverRefId && rawDrivers && rawDrivers[String(driverRefId)]) || (typeof base.id === 'string' && base.id.startsWith('drv-') && rawDrivers && rawDrivers[String(base.id.replace(/^drv-/, ''))]);
+            if (driverExists) computedDisplay = 'ADDED';
+          }
+          base.displayStatus = computedDisplay;
+        } catch (e) { base.displayStatus = base.ApplicationStatus || 'TO REVIEW'; }
 
         // Strip +63 prefix from contact for display (will be re-added on save)
         if (base.contact) {
@@ -552,7 +582,7 @@
 
               // Send notification to linked user (if available) and update user contact/name if edited
               try {
-                const drvRec = rawDrivers && rawDrivers[drvId];
+                const drvRec = rawDrivers && rawDrivers[String(drvId)];
                 const userId = drvRec && drvRec.UserID;
                 if (userId) {
                   // update user contact/name if provided
@@ -588,7 +618,22 @@
               // Update local rawDrivers and applicants view
               try {
                 const updatedApplicants = [...applicants];
-                updatedApplicants[selectedIndex] = { ...updatedApplicants[selectedIndex], ...payload, status: appStatus, color: getStatusColor(appStatus) };
+                // Compute display status: if APPROVED and a driver exists, show ADDED (display-only)
+                let displayStatusAfter = appStatus;
+                try {
+                  if (appStatus === 'APPROVED') {
+                    if (typeof selected.id === 'string' && selected.id.startsWith('drv-')) {
+                      const drvId = selected.id.replace(/^drv-/, '');
+                      if (rawDrivers && rawDrivers[String(drvId)]) displayStatusAfter = 'ADDED';
+                    } else {
+                      const appRec = (rawApplications && rawApplications[selected.id]) || {};
+                      const driverRefId = appRec.DriverID || appRec.driverId || appRec.DriverId || null;
+                      if (driverRefId && rawDrivers && rawDrivers[String(driverRefId)]) displayStatusAfter = 'ADDED';
+                    }
+                  }
+                } catch (e) {}
+
+                updatedApplicants[selectedIndex] = { ...updatedApplicants[selectedIndex], ...payload, status: displayStatusAfter, color: getStatusColor(displayStatusAfter) };
                 setApplicants(updatedApplicants);
 
                 // Update rawDrivers immutably so React picks up change
@@ -631,7 +676,17 @@
             updatedApplicants[selectedIndex] = { 
               ...updatedApplicants[selectedIndex], 
               ApplicationStatus: appStatus, 
-              status: appStatus,
+              // compute display status after this change
+              status: (function(){
+                try {
+                  if (appStatus === 'APPROVED') {
+                    const appRec = (rawApplications && rawApplications[selected.id]) || {};
+                    const driverRefId = appRec.DriverID || appRec.driverId || appRec.DriverId || null;
+                    if (driverRefId && rawDrivers && rawDrivers[String(driverRefId)]) return 'ADDED';
+                  }
+                  return appStatus;
+                } catch(e) { return appStatus; }
+              })(),
               license: formattedLicense || selected.license || '',
               plate: selected.plate || ''
             };
@@ -655,8 +710,8 @@
                   const drvUserId = drvRec && drvRec.UserID;
                   const drvLicenseNorm = normalizeStr(drvRec.LicenseNumber || drvRec.license || '');
 
-                  const matches = (appUserId && drvUserId && appUserId === drvUserId)
-                    || (appDriverId && appDriverId === drvKey)
+                  const matches = (appUserId && drvUserId && String(appUserId) === String(drvUserId))
+                    || (appDriverId && String(appDriverId) === String(drvKey))
                     || (appLicenseNorm && drvLicenseNorm && drvLicenseNorm === appLicenseNorm);
 
                   if (!matches) continue;
@@ -964,7 +1019,7 @@
                       <div>
                         <h4 className="font-bold text-white text-lg">{applicant.name}</h4>
                         <p className="text-sm text-gray-400">
-                          Contact: {applicant.contact} | License: {applicant.license} | Plate: {applicant.plate}
+                          Contact: {stripPhonePrefix(applicant.contact)} | License: {applicant.license} | Plate: {applicant.plate}
                         </p>
                       </div>
                     </div>
@@ -1053,10 +1108,19 @@
                   <Input label="Franchise Expiry" name="franchiseExpiry" value={selected.franchiseExpiry} onChange={handleInputChange} />
 
                   <div>
-                    <label className="block text-sm text-gray-300 mb-2 font-medium">Application Status</label>
+                    <div className="flex items-center gap-3">
+                      <label className="text-sm text-gray-300 font-medium whitespace-nowrap">Application Status</label>
+                      {selected && selected.displayStatus === 'ADDED' && (
+                        <span className="inline-flex items-center ml-2 px-2 py-0.5 text-xs font-semibold rounded bg-blue-600 text-white">
+                          Display: ADDED
+                        </span>
+                      )}
+                    </div>
                     <select
                       name="ApplicationStatus"
                       value={selected.ApplicationStatus || selected.Application_Status || selected.status || 'TO REVIEW'}
+                      // keep a small gap between label row and select
+                      style={{ marginTop: '6px' }}
                       onChange={handleInputChange}
                       className="w-full px-4 py-3 rounded-lg bg-[#252d42] text-white border border-gray-700 focus:border-yellow-500 focus:outline-none"
                     >

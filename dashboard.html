@@ -97,6 +97,14 @@
       const [selectedPassenger, setSelectedPassenger] = React.useState(null);
       const [selectedBooking, setSelectedBooking] = React.useState(null);
 
+      // Helper: strip +63 prefix for display
+      const stripPhonePrefix = (phone) => {
+        if (!phone) return '';
+        const str = phone.toString();
+        if (str.startsWith('+63')) return str.slice(3);
+        return str;
+      };
+
       // Raw objects from DB
       const [rawUsers, setRawUsers] = React.useState({});
       const [rawDrivers, setRawDrivers] = React.useState({});
@@ -526,7 +534,7 @@
                           <div className="text-gray-400 text-sm mt-1 flex gap-4">
                             <span>Tricycle: <strong className="text-white">{d.tricycle}</strong></span>
                             <span>License: <strong className="text-white">{d.license}</strong></span>
-                            <span>Phone: <strong className="text-white">{d.contact}</strong></span>
+                            <span>Phone: <strong className="text-white">{stripPhonePrefix(d.contact)}</strong></span>
                           </div>
                         </li>
                       ))}
@@ -601,7 +609,7 @@
                       <div className="mt-3 space-y-1 text-gray-300 text-sm">
                         <p><strong>Tricycle #:</strong> {selectedDriver.tricycle}</p>
                         <p><strong>License:</strong> {selectedDriver.license}</p>
-                        <p><strong>Contact:</strong> {selectedDriver.contact}</p>
+                        <p><strong>Contact:</strong> {stripPhonePrefix(selectedDriver.contact)}</p>
                         <p><strong>Status:</strong> <span className={selectedDriver.status === "Online" ? "text-green-400" : "text-gray-400"}>{selectedDriver.status}</span></p>
                         <p><strong>Joined:</strong> {selectedDriver.joined}</p>
                         <p><strong>Total Rides:</strong> {selectedDriver.totalRides}</p>
@@ -640,7 +648,7 @@
                       <h3 className="text-2xl font-bold">{selectedPassenger.name}</h3>
                       <p className="text-gray-400 mb-2">{selectedPassenger.location}</p>
                       <div className="mt-3 space-y-1 text-gray-300 text-sm">
-                        <p><strong>Contact:</strong> {selectedPassenger.contact}</p>
+                        <p><strong>Contact:</strong> {stripPhonePrefix(selectedPassenger.contact)}</p>
                         <p><strong>Joined:</strong> {selectedPassenger.joined}</p>
                         <p><strong>Total Rides:</strong> {selectedPassenger.totalRides}</p>
                       </div>

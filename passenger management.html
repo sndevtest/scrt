@@ -95,6 +95,14 @@
   <script type="text/babel">
     const { useState, useEffect } = React;
 
+    // Helper: strip +63 prefix for display
+    const stripPhonePrefix = (phone) => {
+      if (!phone) return '';
+      const str = phone.toString();
+      if (str.startsWith('+63')) return str.slice(3);
+      return str;
+    };
+
     const PassengerManagement = () => {
       const [showEditModal, setShowEditModal] = React.useState(false);
       const [showFilterModal, setShowFilterModal] = React.useState(false);
@@ -459,7 +467,7 @@
                       <div>
                         <h4 className="font-bold text-white text-lg">{p.name}</h4>
                         <p className="text-sm text-gray-400">
-                          Passenger ID: {p.id} | Phone: {p.phone} | {p.rides} rides total
+                          Passenger ID: {p.id} | Phone: {stripPhonePrefix(p.phone)} | {p.rides} rides total
                         </p>
                       </div>
                     </div>

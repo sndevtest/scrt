@@ -122,6 +122,14 @@
         return (value||'').toString().toUpperCase().replace(/[^A-Z0-9]/g, '');
       };
 
+      // Helper: strip +63 prefix for display
+      const stripPhonePrefix = (phone) => {
+        if (!phone) return '';
+        const str = phone.toString();
+        if (str.startsWith('+63')) return str.slice(3);
+        return str;
+      };
+
       // Backfill bookings with a driverSnapshot (name, tricycle, license)
       const backfillBookings = async () => {
         if (!window.db || !window.dbRef || !window.dbGet || !window.dbUpdate) {
@@ -395,7 +403,7 @@
                     <div>
                       <p className="font-bold text-white">{driver.name}</p>
                       <p className="text-sm text-gray-400">
-                        Tricycle #{driver.tricycle} | License: {driver.license} | Phone: {driver.contact}
+                        Tricycle #{driver.tricycle} | License: {driver.license} | Phone: {stripPhonePrefix(driver.contact)}
                       </p>
                     </div>
                   </div>
@@ -675,8 +683,8 @@
         };
 
         const driversArr = Object.entries(rawDrivers || {})
-          // Exclude drivers that have been soft-deleted or explicitly marked inactive
-          .filter(([key, d]) => d && d.IsActive !== false && !d.DeletedAt && d.UserID && rawUsers && rawUsers[d.UserID] && rawUsers[d.UserID].IsActive !== false && !rawUsers[d.UserID].DeletedAt)
+          // Include ALL drivers (including soft-deleted/inactive) so filtering logic works correctly
+          .filter(([key, d]) => d && d.UserID && rawUsers && rawUsers[d.UserID] && rawUsers[d.UserID].IsActive !== false && !rawUsers[d.UserID].DeletedAt)
           .map(([key, d]) => {
           const user = rawUsers && rawUsers[d.UserID];
           const name = makeFullName(user);
@@ -798,7 +806,10 @@
 
               // Update application to link driver
               try {
-                await window.dbUpdate(window.dbRef(window.db, `applications/${appId}`), { LinkedDriverID: newDriverId, ImportedAt: new Date().toISOString(), ApplicationStatus: 'Added' });
+                await window.dbUpdate(window.dbRef(window.db, `applications/${appId}`), { 
+                  DriverID: newDriverId,
+                  ImportedAt: new Date().toISOString()
+                });
               } catch (e) {}
 
               window.showAlert(`Imported ${name || 'applicant'} as driver ID ${newDriverId}`, 'success');
@@ -832,7 +843,7 @@
                     <div key={app.id} className="flex justify-between items-center p-4 rounded-lg bg-[#252d42]">
                       <div>
                         <p className="font-bold text-white">{app.Name || [app.Firstname, app.Middlename, app.Lastname].filter(Boolean).join(' ') || app.ApplicantName || 'Unnamed'}</p>
-                        <p className="text-sm text-gray-400">License: {formatLicense(app.LicenseNumber || app.license || app.License || '')} | Phone: {(app.MobileNumber || app.Mobile || app.Contact || '')}</p>
+                        <p className="text-sm text-gray-400">License: {formatLicense(app.LicenseNumber || app.license || app.License || '')} | Phone: {stripPhonePrefix(app.MobileNumber || app.Mobile || app.Contact || '')}</p>
                       </div>
                       <div className="flex items-center gap-3">
                         <button onClick={() => importApplication(app.id)} disabled={importing[app.id]} className={`px-4 py-2 rounded font-semibold ${importing[app.id] ? 'bg-gray-600 text-white cursor-not-allowed' : 'bg-yellow-500 text-gray-900 hover:bg-yellow-600'}`}>
@@ -1120,7 +1131,7 @@
                       <div className="min-w-0 overflow-hidden">
                         <h4 className="font-bold text-white text-lg truncate">{driver.name}</h4>
                         <p className="text-sm text-gray-400 truncate">
-                          Tricycle #{driver.tricycle} | License: {driver.license} | Phone: {driver.contact}
+                          Tricycle #{driver.tricycle} | License: {driver.license} | Phone: {stripPhonePrefix(driver.contact)}
                         </p>
                       </div>
                     </div>
