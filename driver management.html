@@ -251,7 +251,7 @@
         // Check for duplicate tricycle numbers in current drivers
         const duplicateTricycle = window.drivers && window.drivers.some(d => d.tricycle === newDriver.tricycle);
         if (duplicateTricycle) {
-          window.showAlert("Error: Tricycle number already exists! Please use a unique tricycle number.", 'error');
+          window.showAlert("Error: Plate number already exists! Please use a unique plate number.", 'error');
           return;
         }
           // Ensure license is unique (compare normalized values)
@@ -344,7 +344,7 @@
       };
 
       const exportToCSV = (driversToExport, filename) => {
-        const headers = ["Name", "Tricycle #", "License", "Contact", "Status", "Registered Date", "Franchise Expiry"];
+        const headers = ["Name", "Plate #", "License", "Contact", "Status", "Registered Date", "Franchise Expiry"];
         const csvContent = [
           headers.join(","),
           ...driversToExport.map(driver => 
@@ -404,7 +404,7 @@
                     <div>
                       <p className="font-bold text-white">{driver.name}</p>
                       <p className="text-sm text-gray-400">
-                        Tricycle #{driver.tricycle} | License: {driver.license} | Phone: {stripPhonePrefix(driver.contact)}
+                        Plate #{driver.tricycle} | License: {driver.license} | Phone: {stripPhonePrefix(driver.contact)}
                       </p>
                     </div>
                   </div>
@@ -558,7 +558,7 @@
                 )}
               </div>
               <div>
-                <label className="block text-sm text-gray-300 mb-2 font-medium">Tricycle Number</label>
+                <label className="block text-sm text-gray-300 mb-2 font-medium">Plate Number</label>
                 <input 
                   className="w-full px-4 py-3 rounded-lg bg-[#252d42] text-white border border-gray-700 focus:border-yellow-500 focus:outline-none" 
                   value={editedDriver.tricycle}
@@ -693,8 +693,8 @@
             id: key,
             userId: d.UserID,
             name,
-            // Use TricycleNumber (internal) as the primary field for management/editor
-            tricycle: d.TricycleNumber || d.TricyclePlateNumber || '',
+            // Prefer TricyclePlateNumber (plate number) for display, fall back to internal TricycleNumber
+            tricycle: d.TricyclePlateNumber || d.TricycleNumber || '',
             license: d.LicenseNumber || '',
             contact: user ? user.MobileNumber : '',
             status: d.Status === 'Active' ? 'Active' : 'Inactive'
@@ -1136,7 +1136,7 @@
                       <div className="min-w-0 overflow-hidden">
                         <h4 className="font-bold text-white text-lg truncate">{driver.name}</h4>
                         <p className="text-sm text-gray-400 truncate">
-                          Tricycle #{driver.tricycle} | License: {driver.license} | Phone: {stripPhonePrefix(driver.contact)}
+                          Plate #{driver.tricycle} | License: {driver.license} | Phone: {stripPhonePrefix(driver.contact)}
                         </p>
                       </div>
                     </div>
