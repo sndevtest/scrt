@@ -446,7 +446,7 @@
     const EditDriverModal = ({ driver, driverIndex, onClose, onSave }) => {
       const [editedDriver, setEditedDriver] = useState({
         name: driver.name,
-        contact: driver.contact,
+        contact: stripPhonePrefix(driver.contact),
         registeredDate: "2024-01-15",
         license: driver.license,
         tricycle: driver.tricycle,
@@ -492,7 +492,9 @@
       };
 
       const handleSave = () => {
-        if (editedDriver.contact.length !== 11) {
+        // Strip any non-digit characters to check actual digit count (should be 11)
+        const contactDigits = editedDriver.contact.toString().replace(/\D/g, '');
+        if (contactDigits.length !== 11) {
           window.showAlert("Phone number must be exactly 11 digits!", 'error');
           return;
         }
@@ -510,7 +512,9 @@
             return;
           }
         } catch(e) {}
-        onSave(driverIndex, editedDriver);
+        // Re-add +63 prefix to contact before saving
+        const contactWithPrefix = '+63' + contactDigits;
+        onSave(driverIndex, { ...editedDriver, contact: contactWithPrefix });
       };
 
       if (!driver) return null;
@@ -528,14 +532,17 @@
                 />
               </div>
               <div>
-                <label className="block text-gray-300 mb-2 font-medium" style={{fontSize: 'clamp(0.78rem, 1.1vw, 0.98rem)'}}>Contact Number</label>
-                <input 
-                  className="w-full px-3 py-2 sm:px-4 sm:py-3 rounded-lg bg-[#252d42] text-white border border-gray-700 focus:border-yellow-500 focus:outline-none" style={{fontSize: 'clamp(0.82rem, 1.4vw, 1.05rem)'}} 
-                  value={editedDriver.contact}
-                  onChange={(e) => handleChange('contact', e.target.value)}
-                  maxLength={11}
-                />
-                <p className="text-xs text-gray-400 mt-1">{editedDriver.contact.length}/11 digits</p>
+                <label className="block text-gray-300 mb-2 font-medium" style={{fontSize: 'clamp(0.78rem, 1.1vw, 0.98rem)'}}>Contact Number (11 digits)</label>
+                <div className="flex">
+                  <div className="inline-flex items-center px-3 rounded-l-lg bg-[#1b2333] text-white border border-r-0 border-gray-700">+63</div>
+                  <input 
+                    className="w-full px-3 py-2 sm:px-4 sm:py-3 rounded-r-lg bg-[#252d42] text-white border border-gray-700 focus:border-yellow-500 focus:outline-none" style={{fontSize: 'clamp(0.82rem, 1.4vw, 1.05rem)'}} 
+                    value={editedDriver.contact}
+                    onChange={(e) => handleChange('contact', e.target.value)}
+                    maxLength={11}
+                  />
+                </div>
+                <p className="text-xs text-gray-400 mt-1">{editedDriver.contact.replace(/\D/g, '').length}/11 digits</p>
               </div>
               <div>
                 <label className="block text-gray-300 mb-2 font-medium" style={{fontSize: 'clamp(0.8rem, 1.2vw, 1rem)'}}>Registration Date</label>

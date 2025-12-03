@@ -380,7 +380,17 @@
         // Prefill the modal with applicant values. If this row is backed by a drivers/<id> record,
         // prefer canonical driver/user values so edits can be persisted back to drivers/users.
         const app = applicants[index] || {};
-        const base = { ...app };
+        const base = { 
+          ...app,
+          // Ensure all fields are initialized (prevents undefined values)
+          plate: app.plate || '',
+          tricycleNumber: app.tricycleNumber || '',
+          license: app.license || '',
+          name: app.name || '',
+          contact: app.contact || '',
+          registeredDate: app.registeredDate || '',
+          franchiseExpiry: app.franchiseExpiry || ''
+        };
         
         // Ensure UserID is always captured (critical for saving back to applications/)
         if (!base.UserID) {
@@ -397,15 +407,16 @@
             if (appRec.LicenseNumber) {
               base.license = appRec.LicenseNumber;
             }
-            if (appRec.TricycleNumber) {
+            if (appRec.TricyclePlateNumber) {
+              base.plate = appRec.TricyclePlateNumber;
+            } else if (appRec.TricycleNumber) {
               base.plate = appRec.TricycleNumber;
             }
             // support a distinct internal tricycle number field if present
-            if (appRec.TricyclePlateNumber) {
-              base.plate = appRec.TricyclePlateNumber;
-            }
             if (appRec.InternalTricycleNumber || appRec.TricycleInternal || appRec.TricycleNo) {
               base.tricycleNumber = appRec.InternalTricycleNumber || appRec.TricycleInternal || appRec.TricycleNo;
+            } else if (appRec.TricycleNumber && !base.tricycleNumber) {
+              base.tricycleNumber = appRec.TricycleNumber;
             }
           }
         } catch (e) {}
@@ -418,8 +429,8 @@
               base.UserID = drv.UserID || base.UserID || '';
               base.license = drv.LicenseNumber || drv.license || base.license || '';
                 // Prefer explicit plate field if present, but also capture dedicated tricycle number when available
-                base.plate = drv.TricyclePlateNumber || drv.TricycleNumber || drv.tricycle || base.plate || '';
-                base.tricycleNumber = drv.TricycleNumber || drv.tricycle || drv.TricycleInternal || base.tricycleNumber || '';
+                base.plate = drv.TricyclePlateNumber || base.plate || '';
+                base.tricycleNumber = drv.TricycleNumber || base.tricycleNumber || '';
               base.franchiseExpiry = drv.FranchiseExpiry || drv.franchiseExpiry || base.franchiseExpiry || '';
               // prefer user mobile/name
               const userRec = rawUsers && rawUsers[drv.UserID];
@@ -537,11 +548,11 @@
             name: selected.name,
             contact: contactDigits.length === 11 ? '+63' + contactDigits : selected.contact,
             license: formattedLicense || selected.license || '',
-            plate: selected.plate,
+            plate: selected.plate || '',
             tricycleNumber: selected.tricycleNumber || '',
             // convert displayed date back to ISO-ish string before saving
             registeredDate: displayToIso(selected.registeredDate) || selected.registeredDate || '',
-            franchiseExpiry: selected.franchiseExpiry,
+            franchiseExpiry: selected.franchiseExpiry || '',
             ApplicationStatus: appStatus,
             status: appStatus // keep legacy field in sync for UI compatibility
           };
@@ -555,9 +566,9 @@
               const driverUpdatePayload = { ApplicationStatus: appStatus };
               // include formatted license if provided
               if (payload.license) driverUpdatePayload.LicenseNumber = payload.license;
-              // Persist both plate (explicit) and internal tricycle number for compatibility
-              if (payload.plate) driverUpdatePayload.TricyclePlateNumber = payload.plate;
-              driverUpdatePayload.TricycleNumber = selected.tricycleNumber || payload.plate || '';
+              // Persist plate and tricycle number as SEPARATE fields (always write explicit fields)
+              driverUpdatePayload.TricyclePlateNumber = payload.plate || '';
+              driverUpdatePayload.TricycleNumber = payload.tricycleNumber || '';
               if (payload.franchiseExpiry) driverUpdatePayload.FranchiseExpiry = payload.franchiseExpiry;
               // If status is EXPIRED, mark driver inactive and offline
               if (appStatus === 'EXPIRED') {
@@ -592,7 +603,7 @@
                         status: appStatus,
                         LicenseNumber: payload.license || '',
                         TricyclePlateNumber: payload.plate || '',
-                        TricycleNumber: selected.tricycleNumber || payload.plate || ''
+                        TricycleNumber: payload.tricycleNumber || ''
                       });
                     } catch (e) {
                       console.warn('Failed to update application', appKey, e);
@@ -697,7 +708,7 @@
             ApplicationStatus: appStatus,
             LicenseNumber: formattedLicense || selected.license || '', // Store license in applications
             TricyclePlateNumber: selected.plate || '', // explicit plate
-            TricycleNumber: selected.tricycleNumber || selected.plate || '' // internal/fallback
+            TricycleNumber: selected.tricycleNumber || '' // internal number (no fallback to plate)
           };
           // If admin edited password on the modal and this application references a user, persist password to users/<id>
           try {
@@ -764,13 +775,12 @@
                     driverUpdate.IsOnline = appStatus === 'APPROVED';
                   }
 
-                    // ensure we write both fields for compatibility
-                    const driverUpdateFull = {
-                      ...driverUpdate,
-                      TricyclePlateNumber: driverUpdate.TricyclePlateNumber || driverUpdate.TricycleNumber || '',
-                      TricycleNumber: driverUpdate.TricycleNumber || driverUpdate.TricyclePlateNumber || ''
-                    };
-                    await window.dbUpdate(window.dbRef(window.db, `drivers/${drvKey}`), driverUpdateFull);
+                    // Only update tricycle fields if they were provided in the edit
+                    // Unconditionally update plate/tricycle fields so DB and UI stay in sync
+                    driverUpdate.TricyclePlateNumber = payload.plate || '';
+                    driverUpdate.TricycleNumber = payload.tricycleNumber || '';
+                    // if neither field was edited, preserve existing values by not including them in the update
+                    await window.dbUpdate(window.dbRef(window.db, `drivers/${drvKey}`), driverUpdate);
 
                   // Update local rawDrivers so UI updates immediately
                   updatedRawDrivers[drvKey] = { ...(drvRec || {}), ...driverUpdate };
@@ -1299,8 +1309,9 @@
       <div className="flex flex-col">
         <label className="text-sm text-gray-300 mb-2 font-medium">{label}</label>
         <input
+          key={`${name}-${value}`}
           name={name}
-          value={value}
+          value={value || ''}
           onChange={onChange}
           className="px-4 py-3 rounded-lg bg-[#252d42] text-white border border-gray-700 focus:border-yellow-500 focus:outline-none"
         />
