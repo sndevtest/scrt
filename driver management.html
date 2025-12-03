@@ -1,0 +1,1204 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+  <title>Pasakay - Drivers</title>
+  <link rel="icon" href="tricy.png" type="image/png">
+
+  <script type="module">
+    import { initializeApp } from "https://www.gstatic.com/firebasejs/12.6.0/firebase-app.js";
+    import { getAuth } from "https://www.gstatic.com/firebasejs/12.6.0/firebase-auth.js";
+    import {
+      getDatabase,
+      ref,
+      onValue,
+      get,
+      set,
+      push,
+      remove,
+      update,
+      runTransaction
+    } from "https://www.gstatic.com/firebasejs/12.6.0/firebase-database.js";
+
+    const firebaseConfig = {
+      apiKey: "AIzaSyBS-g5bFBaJ6a35hWmjvoN-s8FuMEuxtew",
+      authDomain: "pasakay-project-ph.firebaseapp.com",
+      databaseURL: "https://pasakay-project-ph-default-rtdb.firebaseio.com",
+      projectId: "pasakay-project-ph",
+      storageBucket: "pasakay-project-ph.firebasestorage.app",
+      messagingSenderId: "189297787561",
+      appId: "1:189297787561:web:ddad5de3fdf638c6d8dfb8",
+      measurementId: "G-2VWQ0C8EZE"
+    };
+
+    // Initialize Firebase
+    const app = initializeApp(firebaseConfig);
+    const auth = getAuth(app);
+    const db = getDatabase(app);
+
+    // Expose DB helpers to the non-module React script
+    window.db = db;
+    window.dbRef = ref;
+    window.dbOnValue = onValue;
+    window.dbGet = get;
+    window.dbSet = set;
+    window.dbPush = push;
+    window.dbRemove = remove;
+    window.dbUpdate = update;
+    window.dbRunTransaction = runTransaction;
+  </script>
+
+  <script src="ui-modals.js"></script>
+
+  <!-- React -->
+  <script crossorigin src="https://unpkg.com/react@18/umd/react.development.js"></script>
+  <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.development.js"></script>
+
+  <!-- Babel -->
+  <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+
+  <!-- Tailwind -->
+  <script src="https://cdn.tailwindcss.com"></script>
+
+  <style>
+    body {
+      font-family: "Inter", sans-serif;
+      background: #0a0e1a;
+      margin: 0;
+    }
+    
+    /* Customized Scrollbar */
+    ::-webkit-scrollbar {
+      width: 10px;
+      height: 10px;
+    }
+    
+    ::-webkit-scrollbar-track {
+      background: #1a2333;
+      border-radius: 10px;
+    }
+    
+    ::-webkit-scrollbar-thumb {
+      background: linear-gradient(180deg, #fbbf24 0%, #f59e0b 100%);
+      border-radius: 10px;
+    }
+    
+    ::-webkit-scrollbar-thumb:hover {
+      background: linear-gradient(180deg, #fcd34d 0%, #fbbf24 100%);
+    }
+    
+    /* Firefox Scrollbar */
+    * {
+      scrollbar-color: #2e3c57 #1a2333;
+      scrollbar-width: thin;
+    }
+  </style>
+</head>
+<body>
+  <div id="root"></div>
+
+  <script type="text/babel">
+    const { useState, useEffect } = React;
+
+    // Helper: format license to pattern A00-00-000000 
+    const formatLicense = (value) => {
+      if (!value) return '';
+      const up = value.toUpperCase();
+      const raw = up.replace(/[^A-Z0-9]/g, '');
+      const p1 = raw.slice(0, 3);
+      const p2 = raw.slice(3, 5);
+      const p3 = raw.slice(5, 11);
+      let formatted = p1;
+      if (p2) formatted += '-' + p2;
+      if (p3) formatted += '-' + p3;
+      return formatted;
+    };
+
+    const isValidLicense = (value) => {
+      return /^[A-Z]\d{2}-\d{2}-\d{6}$/.test((value||'').toString());
+    };
+      const normalizeLicenseForCompare = (value) => {
+        return (value||'').toString().toUpperCase().replace(/[^A-Z0-9]/g, '');
+      };
+
+      // Helper: strip +63 prefix for display
+      const stripPhonePrefix = (phone) => {
+        if (!phone) return '';
+        const str = phone.toString();
+        if (str.startsWith('+63')) return str.slice(3);
+        return str;
+      };
+
+      // Backfill bookings with a driverSnapshot (name, tricycle, license)
+      const backfillBookings = async () => {
+        if (!window.db || !window.dbRef || !window.dbGet || !window.dbUpdate) {
+          window.showAlert('DB helpers not available', 'error');
+          return;
+        }
+        try {
+          const bookingsSnap = await window.dbGet(window.dbRef(window.db, 'booking'));
+          const bookingsVal = bookingsSnap.val() || {};
+          let count = 0;
+          for (const [bkId, b] of Object.entries(bookingsVal)) {
+            if (!b.DriverID) continue;
+            const d = rawDrivers && rawDrivers[b.DriverID];
+            if (!d) continue;
+            const user = rawUsers && rawUsers[d.UserID];
+            const snapshot = {
+              name: user ? [user.Firstname, user.Middlename, user.Lastname].filter(Boolean).join(' ') : '',
+              // Prefer internal TricycleNumber (membership dashboard source of truth) then fallback to plate
+              tricycle: d.TricycleNumber || d.TricyclePlateNumber || '',
+              license: d.LicenseNumber || '',
+              userId: d.UserID || null
+            };
+            await window.dbUpdate(window.dbRef(window.db, `booking/${bkId}`), { driverSnapshot: snapshot });
+            count++;
+          }
+          window.showAlert(`Backfilled ${count} booking(s) with driver snapshot`, 'success');
+        } catch (err) {
+          console.error('Error backfilling bookings:', err);
+          window.showAlert('Error backfilling bookings: ' + (err && err.message ? err.message : err), 'error');
+        }
+      };
+
+    const AddDriverModal = ({ onClose, onSave }) => {
+      const [newDriver, setNewDriver] = useState({
+        name: "",
+        tricycle: "",
+        contact: "",
+        license: "",
+        status: "Active"
+      });
+      const [nameError, setNameError] = useState("");
+      const [licenseError, setLicenseError] = useState("");
+      const [isSaving, setIsSaving] = useState(false);
+
+      const handleChange = (field, value) => {
+        if (field === 'contact') {
+          const numericValue = value.replace(/\D/g, '').slice(0, 11);
+          setNewDriver(prev => ({
+            ...prev,
+            [field]: numericValue
+          }));
+        } else if (field === 'name') {
+          // Allow letters, spaces, hyphens and apostrophes only; show error if digits present
+          const hadDigits = /\d/.test(value);
+          if (hadDigits) {
+            setNameError('Names cannot contain numbers');
+          } else {
+            setNameError('');
+          }
+          const sanitized = value.replace(/[^a-zA-Z\s\-']/g, '');
+          setNewDriver(prev => ({
+            ...prev,
+            [field]: sanitized
+          }));
+        } else {
+          setNewDriver(prev => ({
+            ...prev,
+            [field]: value
+          }));
+        }
+        
+        if (field === 'license') {
+          // Allow the user to edit freely while typing. Only strip disallowed chars.
+          const raw = value.replace(/[^A-Za-z0-9\-]/g, '');
+          setNewDriver(prev => ({ ...prev, license: raw }));
+          setLicenseError('');
+        }
+      };
+
+      const handleBlur = (field) => {
+        if (field === 'license') {
+          const formatted = formatLicense(newDriver.license);
+          // Update the input value with formatted value on blur
+          setNewDriver(prev => ({ ...prev, license: formatted }));
+          if (!formatted || formatted.length < 13) {
+            setLicenseError('License number seems incomplete.');
+            return;
+          }
+          if (!isValidLicense(formatted)) {
+            setLicenseError('License must match format A01-23-456789');
+          } else {
+            setLicenseError('');
+          }
+        }
+      };
+
+      const handleAddDriver = () => {
+        if (isSaving) return;
+        if (!newDriver.name || !newDriver.tricycle || !newDriver.contact || !newDriver.license) {
+          window.showAlert("Please fill in all fields!", 'error');
+          return;
+        }
+        // Format and ensure license matches required format
+        const formattedLicense = formatLicense(newDriver.license);
+        const licenseRegex = /^[A-Z]\d{2}-\d{2}-\d{6}$/;
+        if (!licenseRegex.test(formattedLicense)) {
+          window.showAlert('License number must match format like A01-23-456789', 'error');
+          return;
+        }
+        // Final validation: ensure no digits slipped through
+        if (/\d/.test(newDriver.name)) {
+          window.showAlert('Full name cannot contain numbers. Please remove any digits.', 'error');
+          return;
+        }
+        if (newDriver.contact.length !== 11) {
+          window.showAlert("Phone number must be exactly 11 digits!", 'error');
+          return;
+        }
+        // Check for duplicate tricycle numbers in current drivers
+        const duplicateTricycle = window.drivers && window.drivers.some(d => d.tricycle === newDriver.tricycle);
+        if (duplicateTricycle) {
+          window.showAlert("Error: Tricycle number already exists! Please use a unique tricycle number.", 'error');
+          return;
+        }
+          // Ensure license is unique (compare normalized values)
+          try {
+            const normNew = normalizeLicenseForCompare(newDriver.license);
+            const dup = window.drivers && window.drivers.some(d => normalizeLicenseForCompare(d.license) === normNew);
+            if (dup) {
+              window.showAlert('License number already exists. Please provide a unique license number.', 'error');
+              return;
+            }
+          } catch(e) {}
+        // call onSave and prevent double submissions
+        try {
+          setIsSaving(true);
+          const res = onSave(newDriver);
+          // support async onSave (it is async in parent)
+          if (res && typeof res.then === 'function') {
+            res.then(() => setIsSaving(false)).catch(() => setIsSaving(false));
+          } else {
+            setIsSaving(false);
+          }
+        } catch (e) {
+          setIsSaving(false);
+          throw e;
+        }
+      };
+
+      return (
+        <div className="fixed inset-0 flex items-center justify-center bg-black bg-opacity-80 z-50">
+          <div className="bg-[#1e2538] p-8 rounded-xl w-[500px]">
+            <h2 className="text-2xl font-bold mb-6 text-white">Add New Driver</h2>
+            <div className="grid grid-cols-2 gap-4">
+              <input 
+                className="col-span-1 px-4 py-3 rounded-lg bg-[#252d42] text-white border border-gray-700 focus:border-yellow-500 focus:outline-none" 
+                placeholder="Full Name" 
+                value={newDriver.name}
+                onChange={(e) => handleChange('name', e.target.value)}
+              />
+              {nameError && (
+                <p className="col-span-2 text-sm text-red-400 mt-1">{nameError}</p>
+              )}
+              <input 
+                className="col-span-1 px-4 py-3 rounded-lg bg-[#252d42] text-white border border-gray-700 focus:border-yellow-500 focus:outline-none" 
+                placeholder="Tricycle Plate Number" 
+                value={newDriver.tricycle}
+                onChange={(e) => handleChange('tricycle', e.target.value)}
+              />
+              <input 
+                className="col-span-1 px-4 py-3 rounded-lg bg-[#252d42] text-white border border-gray-700 focus:border-yellow-500 focus:outline-none" 
+                placeholder="Phone Number (11 digits)" 
+                value={newDriver.contact}
+                onChange={(e) => handleChange('contact', e.target.value)}
+                maxLength={11}
+              />
+              <input 
+                className="col-span-1 px-4 py-3 rounded-lg bg-[#252d42] text-white border border-gray-700 focus:border-yellow-500 focus:outline-none" 
+                placeholder="License Number (e.g. A01-23-456789)" 
+                value={newDriver.license}
+                onChange={(e) => handleChange('license', e.target.value)}
+                onBlur={() => handleBlur('license')}
+                maxLength={13}
+              />
+              {licenseError && (
+                <p className="col-span-2 text-sm text-red-400 mt-1">{licenseError}</p>
+              )}
+            </div>
+            <p className="text-xs text-gray-400 mt-2">Phone number: {newDriver.contact.length}/11 digits</p>
+            <div className="flex justify-between mt-6">
+              <button onClick={onClose} className="bg-red-600 hover:bg-red-700 px-8 py-3 rounded-lg font-semibold text-white">Cancel</button>
+              <button onClick={handleAddDriver} disabled={isSaving} className={`px-8 py-3 rounded-lg font-semibold text-white ${isSaving ? 'bg-gray-600 cursor-not-allowed' : 'bg-green-600 hover:bg-green-700'}`}>
+                {isSaving ? 'Adding…' : 'Add Driver'}
+              </button>
+            </div>
+          </div>
+        </div>
+      );
+    };
+
+
+
+    const ExportDataModal = ({ drivers, onClose }) => {
+      const [selectedDrivers, setSelectedDrivers] = useState([]);
+
+      const toggleDriver = (index) => {
+        setSelectedDrivers(prev => 
+          prev.includes(index) 
+            ? prev.filter(i => i !== index)
+            : [...prev, index]
+        );
+      };
+
+      const exportToCSV = (driversToExport, filename) => {
+        const headers = ["Name", "Tricycle #", "License", "Contact", "Status", "Registered Date", "Franchise Expiry"];
+        const csvContent = [
+          headers.join(","),
+          ...driversToExport.map(driver => 
+            `"${driver.name}","${driver.tricycle}","${driver.license}","${driver.contact}","${driver.status}","Jan 15, 2024","Jan 15, 2025"`
+          )
+        ].join("\n");
+
+        const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
+        const link = document.createElement("a");
+        const url = URL.createObjectURL(blob);
+        link.setAttribute("href", url);
+        link.setAttribute("download", filename);
+        link.style.visibility = 'hidden';
+        document.body.appendChild(link);
+        link.click();
+        document.body.removeChild(link);
+      };
+
+      const handleExportSelected = () => {
+        if (selectedDrivers.length === 0) {
+          window.showAlert("Please select at least one driver to export!", 'error');
+          return;
+        }
+        const driversToExport = selectedDrivers.map(index => drivers[index]);
+        exportToCSV(driversToExport, 'selected_drivers.csv');
+        window.showAlert(`Exported ${selectedDrivers.length} driver(s) successfully!`, 'success');
+      };
+
+      const handleExportAll = () => {
+        exportToCSV(drivers, 'all_drivers.csv');
+        window.showAlert(`Exported all ${drivers.length} drivers successfully!`, 'success');
+      };
+
+      return (
+        <div className="fixed inset-0 flex items-center justify-center bg-black bg-opacity-80 z-50 overflow-y-auto py-8">
+          <div className="bg-[#1e2538] p-8 rounded-xl w-[700px] max-h-[90vh] overflow-y-auto">
+            <h2 className="text-2xl font-bold mb-6 text-white">Export Data</h2>
+            <p className="text-gray-300 mb-4 text-sm">Select drivers to export or export all data</p>
+            <div className="space-y-3">
+              {drivers.map((driver, idx) => (
+                <div 
+                  key={idx} 
+                  onClick={() => toggleDriver(idx)}
+                  className={`flex justify-between items-center p-4 rounded-lg cursor-pointer transition-all ${
+                    selectedDrivers.includes(idx) 
+                      ? 'bg-yellow-500 bg-opacity-20 border-2 border-yellow-500' 
+                      : 'bg-[#252d42] border-2 border-transparent hover:border-gray-600'
+                  }`}
+                >
+                  <div className="flex items-center gap-3">
+                    <input 
+                      type="checkbox" 
+                      checked={selectedDrivers.includes(idx)}
+                      onChange={() => toggleDriver(idx)}
+                      className="w-5 h-5 cursor-pointer"
+                    />
+                    <div>
+                      <p className="font-bold text-white">{driver.name}</p>
+                      <p className="text-sm text-gray-400">
+                        Tricycle #{driver.tricycle} | License: {driver.license} | Phone: {stripPhonePrefix(driver.contact)}
+                      </p>
+                    </div>
+                  </div>
+                  <span className={`px-3 py-1 rounded text-sm font-bold text-white ${driver.status === "Active" ? "bg-green-500" : "bg-gray-500"}`}>
+                    {driver.status === "Active" ? "ONLINE" : "OFFLINE"}
+                  </span>
+                </div>
+              ))}
+            </div>
+            <div className="flex justify-between mt-6">
+              <button onClick={onClose} className="bg-red-600 hover:bg-red-700 px-6 py-3 rounded-lg font-semibold text-white">Close</button>
+              <div className="flex gap-3">
+                <button 
+                  onClick={handleExportSelected}
+                  className="bg-yellow-500 hover:bg-yellow-600 px-6 py-3 rounded-lg font-semibold text-gray-900 flex items-center gap-2"
+                >
+                  <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
+                  </svg>
+                  Export Selected ({selectedDrivers.length})
+                </button>
+                <button 
+                  onClick={handleExportAll}
+                  className="bg-yellow-500 hover:bg-yellow-600 px-6 py-3 rounded-lg font-semibold text-gray-900 flex items-center gap-2"
+                >
+                  <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 10v6m0 0l-3-3m3 3l3-3m2 8H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
+                  </svg>
+                  Export All ({drivers.length})
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      );
+    };
+
+    const EditDriverModal = ({ driver, driverIndex, onClose, onSave }) => {
+      const [editedDriver, setEditedDriver] = useState({
+        name: driver.name,
+        contact: driver.contact,
+        registeredDate: "2024-01-15",
+        license: driver.license,
+        tricycle: driver.tricycle,
+        franchiseExpiry: "2025-01-15",
+        status: driver.status
+      });
+      const [editedLicenseError, setEditedLicenseError] = useState("");
+
+      const handleChange = (field, value) => {
+        if (field === 'contact') {
+          const numericValue = value.replace(/\D/g, '').slice(0, 11);
+          setEditedDriver(prev => ({
+            ...prev,
+            [field]: numericValue
+          }));
+        } else if (field === 'license') {
+          // Allow free editing; sanitize disallowed chars but do not reformat yet
+          const raw = value.replace(/[^A-Za-z0-9\-]/g, '');
+          setEditedDriver(prev => ({ ...prev, license: raw }));
+          setEditedLicenseError('');
+        } else {
+          setEditedDriver(prev => ({
+            ...prev,
+            [field]: value
+          }));
+        }
+      };
+
+      const handleEditBlur = (field) => {
+        if (field === 'license') {
+          const formatted = formatLicense(editedDriver.license);
+          setEditedDriver(prev => ({ ...prev, license: formatted }));
+          if (!formatted || formatted.length < 13) {
+            setEditedLicenseError('License number seems incomplete.');
+            return;
+          }
+          if (!isValidLicense(formatted)) {
+            setEditedLicenseError('License must match format A01-23-456789');
+          } else {
+            setEditedLicenseError('');
+          }
+        }
+      };
+
+      const handleSave = () => {
+        if (editedDriver.contact.length !== 11) {
+          window.showAlert("Phone number must be exactly 11 digits!", 'error');
+          return;
+        }
+        // Validate license format on save
+        if (!isValidLicense(editedDriver.license)) {
+          window.showAlert('License number must match format like A01-23-456789', 'error');
+          return;
+        }
+        // Ensure license is unique (excluding the current driver)
+        try {
+          const normEdited = normalizeLicenseForCompare(editedDriver.license);
+          const dup = window.drivers && window.drivers.some(d => normalizeLicenseForCompare(d.license) === normEdited && d.id !== driver.id);
+          if (dup) {
+            window.showAlert('License number already exists for another driver. Please use a unique license number.', 'error');
+            return;
+          }
+        } catch(e) {}
+        onSave(driverIndex, editedDriver);
+      };
+
+      if (!driver) return null;
+      return (
+        <div className="fixed inset-0 flex items-center justify-center bg-black bg-opacity-80 z-50">
+          <div className="bg-[#1e2538] p-8 rounded-xl w-[600px]">
+            <h2 className="text-2xl font-bold mb-6 text-white">Edit Driver Information</h2>
+            <div className="grid grid-cols-2 gap-4">
+              <div className="col-span-2">
+                <label className="block text-sm text-gray-300 mb-2 font-medium">Driver Name</label>
+                <input 
+                  className="w-full px-4 py-3 rounded-lg bg-[#252d42] text-white border border-gray-700 focus:border-yellow-500 focus:outline-none" 
+                  value={editedDriver.name}
+                  onChange={(e) => handleChange('name', e.target.value)}
+                />
+              </div>
+              <div>
+                <label className="block text-sm text-gray-300 mb-2 font-medium">Contact Number</label>
+                <input 
+                  className="w-full px-4 py-3 rounded-lg bg-[#252d42] text-white border border-gray-700 focus:border-yellow-500 focus:outline-none" 
+                  value={editedDriver.contact}
+                  onChange={(e) => handleChange('contact', e.target.value)}
+                  maxLength={11}
+                />
+                <p className="text-xs text-gray-400 mt-1">{editedDriver.contact.length}/11 digits</p>
+              </div>
+              <div>
+                <label className="block text-sm text-gray-300 mb-2 font-medium">Registration Date</label>
+                <input 
+                  type="date" 
+                  className="w-full px-4 py-3 rounded-lg bg-[#252d42] text-white border border-gray-700 focus:border-yellow-500 focus:outline-none" 
+                  value={editedDriver.registeredDate}
+                  onChange={(e) => handleChange('registeredDate', e.target.value)}
+                />
+              </div>
+              <div>
+                <label className="block text-sm text-gray-300 mb-2 font-medium">License Number</label>
+                <input 
+                  className="w-full px-4 py-3 rounded-lg bg-[#252d42] text-white border border-gray-700 focus:border-yellow-500 focus:outline-none" 
+                  value={editedDriver.license}
+                  onChange={(e) => handleChange('license', e.target.value)}
+                  onBlur={() => handleEditBlur('license')}
+                />
+                {editedLicenseError && (
+                  <p className="text-sm text-red-400 mt-1">{editedLicenseError}</p>
+                )}
+              </div>
+              <div>
+                <label className="block text-sm text-gray-300 mb-2 font-medium">Tricycle Number</label>
+                <input 
+                  className="w-full px-4 py-3 rounded-lg bg-[#252d42] text-white border border-gray-700 focus:border-yellow-500 focus:outline-none" 
+                  value={editedDriver.tricycle}
+                  onChange={(e) => handleChange('tricycle', e.target.value)}
+                />
+              </div>
+              <div>
+                <label className="block text-sm text-gray-300 mb-2 font-medium">Franchise Expiry</label>
+                <input 
+                  type="date" 
+                  className="w-full px-4 py-3 rounded-lg bg-[#252d42] text-white border border-gray-700 focus:border-yellow-500 focus:outline-none" 
+                  value={editedDriver.franchiseExpiry}
+                  onChange={(e) => handleChange('franchiseExpiry', e.target.value)}
+                />
+              </div>
+              <div>
+                <label className="block text-sm text-gray-300 mb-2 font-medium">Status</label>
+                <select 
+                  className="w-full px-4 py-3 rounded-lg bg-[#252d42] text-white border border-gray-700 focus:border-yellow-500 focus:outline-none" 
+                  value={editedDriver.status}
+                  onChange={(e) => handleChange('status', e.target.value)}
+                >
+                  <option value="Active">Active</option>
+                  <option value="Inactive">Inactive</option>
+                </select>
+              </div>
+            </div>
+            <div className="flex justify-between mt-6">
+              <button onClick={onClose} className="bg-red-600 hover:bg-red-700 px-8 py-3 rounded-lg font-semibold text-white">Cancel</button>
+              <button onClick={handleSave} className="bg-green-600 hover:bg-green-700 px-8 py-3 rounded-lg font-semibold text-white">Save Changes</button>
+            </div>
+          </div>
+        </div>
+      );
+    };
+
+    const DriverManagement = () => {
+      const [selectedDriver, setSelectedDriver] = useState(null);
+      const [selectedDriverIndex, setSelectedDriverIndex] = useState(null);
+      const [showExportModal, setShowExportModal] = useState(false);
+      const [showAddModal, setShowAddModal] = useState(false);
+      const [confirmDelete, setConfirmDelete] = useState({ open: false, index: null });
+
+      // Raw objects from DB
+      const [rawUsers, setRawUsers] = useState({});
+      const [rawDrivers, setRawDrivers] = useState({});
+      const [rawApplications, setRawApplications] = useState({});
+
+      // Derived arrays for UI
+      const [drivers, setDrivers] = useState([]);
+
+      // Set up realtime listeners to DB nodes
+      useEffect(() => {
+        if (!window.db || !window.dbRef || !window.dbOnValue) return;
+
+        const usersRef = window.dbRef(window.db, 'users');
+        const driversRef = window.dbRef(window.db, 'drivers');
+        const applicationsRef = window.dbRef(window.db, 'applications');
+
+        const unsubUsers = window.dbOnValue(usersRef, snap => setRawUsers(snap.val() || {}));
+        const unsubDrivers = window.dbOnValue(driversRef, snap => setRawDrivers(snap.val() || {}));
+        const unsubApplications = window.dbOnValue(applicationsRef, snap => setRawApplications(snap.val() || {}));
+
+        return () => {
+          try { unsubUsers(); } catch(e) {}
+          try { unsubDrivers(); } catch(e) {}
+          try { unsubApplications(); } catch(e) {}
+        };
+      }, []);
+
+    // Derived list: approved applications that are not yet present in drivers
+    const approvedApplications = (() => {
+      try {
+        const apps = rawApplications || {};
+        const appsArr = Object.entries(apps).map(([id, a]) => {
+          // Enrich with user data from users/ if available
+          const userId = a.UserID;
+          const user = userId && rawUsers && rawUsers[userId];
+          const name = user ? [user.Firstname, user.Middlename, user.Lastname].filter(Boolean).join(' ') : (a.Name || a.ApplicantName || 'Unnamed');
+          const phone = user ? user.MobileNumber : (a.MobileNumber || a.Contact || a.Mobile || '');
+          return {
+            id,
+            ...a,
+            // Add resolved user data for display
+            Name: name,
+            Firstname: user ? user.Firstname : a.Firstname,
+            Middlename: user ? user.Middlename : a.Middlename,
+            Lastname: user ? user.Lastname : a.Lastname,
+            MobileNumber: phone,
+            UserID: userId
+          };
+        });
+        const approved = appsArr.filter(a => (a.ApplicationStatus || '').toString().toLowerCase() === 'approved');
+        const filtered = approved.filter(a => {
+          // Filter out applications where user has been deleted
+          const userId = a.UserID;
+          if (userId && !rawUsers[userId]) {
+            return false; // user deleted, skip this application
+          }
+          
+          const appLicense = normalizeLicenseForCompare(a.LicenseNumber || a.license || a.License || '');
+          if (appLicense) {
+            const existsByLicense = drivers.some(d => normalizeLicenseForCompare(d.license) === appLicense);
+            if (existsByLicense) return false;
+          }
+          if (a.UserID) {
+            const existsByUser = drivers.some(d => d.userId === a.UserID);
+            if (existsByUser) return false;
+          }
+          return true;
+        });
+        return filtered;
+      } catch (e) {
+        return [];
+      }
+    })();
+
+      // Derive drivers array from DB objects
+      useEffect(() => {
+        const makeFullName = (u) => {
+          if (!u) return 'Unknown';
+          return [u.Firstname, u.Middlename, u.Lastname].filter(Boolean).join(' ');
+        };
+
+        const driversArr = Object.entries(rawDrivers || {})
+          // Include ALL drivers (including soft-deleted/inactive) so filtering logic works correctly
+          .filter(([key, d]) => d && d.UserID && rawUsers && rawUsers[d.UserID] && rawUsers[d.UserID].IsActive !== false && !rawUsers[d.UserID].DeletedAt)
+          .map(([key, d]) => {
+          const user = rawUsers && rawUsers[d.UserID];
+          const name = makeFullName(user);
+          return {
+            id: key,
+            userId: d.UserID,
+            name,
+            // Use TricycleNumber (internal) as the primary field for management/editor
+            tricycle: d.TricycleNumber || d.TricyclePlateNumber || '',
+            license: d.LicenseNumber || '',
+            contact: user ? user.MobileNumber : '',
+            status: d.Status === 'Active' ? 'Active' : 'Inactive'
+          };
+        });
+
+        setDrivers(driversArr);
+        // Expose drivers array to window for validation in modal
+        window.drivers = driversArr;
+      }, [rawUsers, rawDrivers]);
+
+      // Helper: atomically claim the smallest available numeric ID for a node (e.g., 'drivers' or 'users')
+      const claimSmallestNumericId = async (baseNode) => {
+        if (!window.dbGet || !window.dbRef || !window.dbRunTransaction) throw new Error('DB helpers missing');
+        const nodeRef = window.dbRef(window.db, baseNode);
+        const snap = await window.dbGet(nodeRef);
+        const keys = snap && snap.val() ? Object.keys(snap.val()) : [];
+        const numericKeys = keys.map(k => parseInt(k, 10)).filter(n => Number.isInteger(n) && n > 0);
+        const max = numericKeys.length ? Math.max(...numericKeys) : 0;
+
+        // Try to claim the smallest missing id from 1..max, else claim max+1
+        for (let candidate = 1; candidate <= max; candidate++) {
+          if (!numericKeys.includes(candidate)) {
+            const allocRef = window.dbRef(window.db, `allocations/${baseNode}/${candidate}`);
+            try {
+              const tx = await window.dbRunTransaction(allocRef, (current) => {
+                if (current) return; // already claimed
+                return { reservedAt: Date.now() };
+              });
+              if (tx && tx.committed) {
+                return candidate; // Return NUMBER, not string
+              }
+            } catch (e) {
+              // race, try next
+            }
+          }
+        }
+
+        // Claim max+1
+        const newId = max + 1;
+        const allocRef2 = window.dbRef(window.db, `allocations/${baseNode}/${newId}`);
+        await window.dbRunTransaction(allocRef2, (current) => {
+          if (current) return; // if someone else claimed, we'll fall through
+          return { reservedAt: Date.now() };
+        });
+        return newId; // Return NUMBER, not string
+      };
+
+        // Modal component for importing approved applications (defined inside DriverManagement so it can access helpers)
+        const ImportApprovedModal = ({ onClose }) => {
+          const [importing, setImporting] = useState({});
+
+          const importApplication = async (appId) => {
+            if (importing[appId]) return;
+            setImporting(prev => ({ ...prev, [appId]: true }));
+            try {
+              const app = rawApplications && rawApplications[appId];
+              if (!app) {
+                window.showAlert('Application not found', 'error');
+                return;
+              }
+
+              const name = app.Name || ([app.Firstname, app.Middlename, app.Lastname].filter(Boolean).join(' ')) || app.ApplicantName || '';
+              const phone = (app.MobileNumber || app.Mobile || app.Contact || '').toString().replace(/\D/g, '').slice(0, 11);
+              const licenseRaw = app.LicenseNumber || app.license || app.License || '';
+              const license = formatLicense(licenseRaw);
+              if (!isValidLicense(license)) {
+                window.showAlert('Application has invalid license format: ' + (licenseRaw || ''), 'error');
+                return;
+              }
+
+              const norm = normalizeLicenseForCompare(license);
+              const existsLicense = Object.values(rawDrivers || {}).some(d => normalizeLicenseForCompare(d.LicenseNumber || d.license || '') === norm);
+              if (existsLicense) {
+                window.showAlert('A driver with this license already exists in the system.', 'error');
+                return;
+              }
+
+              // Determine user id: reuse if provided and exists, otherwise create new user
+              let userId = app.UserID;
+              if (!userId || !rawUsers[userId]) {
+                userId = await claimSmallestNumericId('users');
+                const nameParts = (name || '').trim().split(/\s+/);
+                const firstname = nameParts[0] || '';
+                const lastname = nameParts.length > 1 ? nameParts[nameParts.length - 1] : '';
+                const middlename = nameParts.length > 2 ? nameParts.slice(1, -1).join(' ') : '';
+                const userData = {
+                  Firstname: firstname,
+                  Middlename: middlename,
+                  Lastname: lastname,
+                  MobileNumber: phone,
+                  Role: 'Driver',
+                  CreatedAt: new Date().toISOString(),
+                  Status: 'Active',
+                  IsActive: true
+                };
+                await window.dbSet(window.dbRef(window.db, `users/${userId}`), userData);
+              }
+
+              // Claim driver id and create driver record
+              const newDriverId = await claimSmallestNumericId('drivers');
+              const driverData = {
+                UserID: userId,
+                LicenseNumber: license,
+                TricyclePlateNumber: app.TricyclePlateNumber || app.TricycleNumber || app.tricycle || app.Tricycle || '',
+                TricycleNumber: app.TricycleNumber || app.tricycle || app.Tricycle || '',
+                Status: 'Active',
+                IsActive: true,
+                CreatedAt: new Date().toISOString()
+              };
+              await window.dbSet(window.dbRef(window.db, `drivers/${newDriverId}`), driverData);
+
+              // Update application to link driver
+              try {
+                await window.dbUpdate(window.dbRef(window.db, `applications/${appId}`), { 
+                  DriverID: newDriverId,
+                  ImportedAt: new Date().toISOString()
+                });
+              } catch (e) {}
+
+              window.showAlert(`Imported ${name || 'applicant'} as driver ID ${newDriverId}`, 'success');
+            } catch (err) {
+              console.error('Error importing application', err);
+              window.showAlert('Error importing application: ' + (err && err.message ? err.message : err), 'error');
+            } finally {
+              setImporting(prev => { const n = { ...prev }; n[appId] = false; return n; });
+            }
+          };
+
+          const importAll = async () => {
+            for (const app of approvedApplications || []) {
+              await importApplication(app.id);
+            }
+          };
+
+          return (
+            <div className="fixed inset-0 flex items-center justify-center bg-black bg-opacity-80 z-50 overflow-y-auto py-8">
+              <div className="bg-[#1e2538] p-6 rounded-xl w-[720px] max-h-[90vh] overflow-y-auto">
+                <div className="flex justify-between items-center mb-4">
+                  <h2 className="text-2xl font-bold text-white">Driver Approved Applications</h2>
+                  <div className="flex items-center gap-2">
+                    <button onClick={importAll} className="bg-green-600 hover:bg-green-700 px-4 py-2 rounded text-white">Import All</button>
+                    <button onClick={onClose} className="bg-red-600 hover:bg-red-700 px-4 py-2 rounded text-white">Close</button>
+                  </div>
+                </div>
+                <p className="text-gray-300 text-sm mb-4">These are the applications that approved by TODA Officer and are not yet present in Driver Management.</p>
+                <div className="space-y-3">
+                  {(approvedApplications && approvedApplications.length) ? approvedApplications.map((app) => (
+                    <div key={app.id} className="flex justify-between items-center p-4 rounded-lg bg-[#252d42]">
+                      <div>
+                        <p className="font-bold text-white">{app.Name || [app.Firstname, app.Middlename, app.Lastname].filter(Boolean).join(' ') || app.ApplicantName || 'Unnamed'}</p>
+                        <p className="text-sm text-gray-400">License: {formatLicense(app.LicenseNumber || app.license || app.License || '')} | Phone: {stripPhonePrefix(app.MobileNumber || app.Mobile || app.Contact || '')}</p>
+                      </div>
+                      <div className="flex items-center gap-3">
+                        <button onClick={() => importApplication(app.id)} disabled={importing[app.id]} className={`px-4 py-2 rounded font-semibold ${importing[app.id] ? 'bg-gray-600 text-white cursor-not-allowed' : 'bg-yellow-500 text-gray-900 hover:bg-yellow-600'}`}>
+                          {importing[app.id] ? 'Importing…' : 'Import'}
+                        </button>
+                      </div>
+                    </div>
+                  )) : (
+                    <p className="text-gray-400">No approved applications available for import.</p>
+                  )}
+                </div>
+              </div>
+            </div>
+          );
+        };
+
+      const handleEditDriver = (index) => {
+        setSelectedDriver(drivers[index]);
+        setSelectedDriverIndex(index);
+      };
+
+      const handleSaveDriver = async (index, editedDriver) => {
+        try {
+          const driverToUpdate = drivers[index];
+          const driverId = driverToUpdate.id;
+          const userId = driverToUpdate.userId;
+
+          // Split the name into first, middle, last
+          const nameParts = editedDriver.name.trim().split(/\s+/);
+          const firstname = nameParts[0] || '';
+          const lastname = nameParts.length > 1 ? nameParts[nameParts.length - 1] : '';
+          const middlename = nameParts.length > 2 ? nameParts.slice(1, -1).join(' ') : '';
+
+          // Update user record in Firebase
+          const userRef = window.dbRef(window.db, `users/${userId}`);
+          // Read the existing user object
+          const userSnap = await window.dbGet(userRef);
+          const userObj = userSnap.exists() ? userSnap.val() : {};
+          // Update only relevant fields
+          userObj.Firstname = firstname;
+          userObj.Middlename = middlename;
+          userObj.Lastname = lastname;
+          userObj.MobileNumber = editedDriver.contact;
+          userObj.IsActive = editedDriver.status === 'Active';
+          await window.dbSet(userRef, userObj);
+
+          // Update driver record in Firebase
+          const driverRef = window.dbRef(window.db, `drivers/${driverId}`);
+          await window.dbUpdate(driverRef, {
+            LicenseNumber: editedDriver.license,
+            TricyclePlateNumber: editedDriver.tricycle,
+            TricycleNumber: editedDriver.tricycle,
+            IsActive: editedDriver.status === 'Active',
+            Status: editedDriver.status
+          });
+
+          // Update local state (will also be updated by realtime listener)
+          const updatedDrivers = [...drivers];
+          updatedDrivers[index] = {
+            ...updatedDrivers[index],
+            name: editedDriver.name,
+            contact: editedDriver.contact,
+            license: editedDriver.license,
+            tricycle: editedDriver.tricycle,
+            status: editedDriver.status
+          };
+          setDrivers(updatedDrivers);
+          setSelectedDriver(null);
+          setSelectedDriverIndex(null);
+          window.showAlert("Driver information updated successfully!", 'success');
+        } catch (error) {
+          console.error('Error updating driver:', error);
+          window.showAlert('Error updating driver: ' + error.message, 'error');
+        }
+      };
+
+      const handleAddNewDriver = async (newDriver) => {
+        try {
+          // Claim smallest available numeric IDs for user and driver
+          const newUserId = await claimSmallestNumericId('users');
+
+          // Split the name into first, middle, last
+          const nameParts = newDriver.name.trim().split(/\s+/);
+          const firstname = nameParts[0] || '';
+          const lastname = nameParts.length > 1 ? nameParts[nameParts.length - 1] : '';
+          const middlename = nameParts.length > 2 ? nameParts.slice(1, -1).join(' ') : '';
+
+          const userData = {
+            Firstname: firstname,
+            Middlename: middlename,
+            Lastname: lastname,
+            MobileNumber: newDriver.contact,
+            Role: 'Driver',
+            CreatedAt: new Date().toISOString(),
+            IsActive: true
+          };
+
+          const userRef = window.dbRef(window.db, `users/${newUserId}`);
+          await window.dbSet(userRef, userData);
+
+          const newDriverId = await claimSmallestNumericId('drivers');
+
+          // Ensure license is formatted before writing to DB (formattedLicense may come from modal validation)
+          const formattedLicense = formatLicense(newDriver.license);
+
+          const driverData = {
+            UserID: newUserId,
+            LicenseNumber: formattedLicense,
+            TricyclePlateNumber: newDriver.tricycle,
+            TricycleNumber: newDriver.tricycle,
+            Status: 'Active',
+            IsActive: true,
+            CreatedAt: new Date().toISOString()
+          };
+
+          const driverRef = window.dbRef(window.db, `drivers/${newDriverId}`);
+          await window.dbSet(driverRef, driverData);
+
+          // Mark allocation entries with the created id (optional) so they show claimed
+          // (no explicit allocation writes here — reservation is handled inside claimSmallestNumericId)
+
+          setShowAddModal(false);
+          window.showAlert(`Driver ${newDriver.name} added successfully (ID: ${newDriverId}) to Firebase!`, 'success');
+        } catch (error) {
+          console.error('Error adding driver:', error);
+          window.showAlert('Error adding driver to database: ' + (error && error.message ? error.message : error), 'error');
+        }
+      };
+
+      const handleDeleteDriver = (index) => {
+        // Open the custom confirm modal instead of using the browser confirm()
+        setConfirmDelete({ open: true, index });
+      };
+
+      const performDeleteDriver = async (index) => {
+        const driverToDelete = drivers[index];
+        if (!driverToDelete) return;
+        try {
+          const driverKey = driverToDelete.id;
+          const driverRecord = rawDrivers && rawDrivers[driverKey];
+          const userIdToDelete = driverRecord ? driverRecord.UserID : null;
+
+          // Soft-delete: mark driver and user as inactive rather than removing records
+          const driverRef = window.dbRef(window.db, `drivers/${driverKey}`);
+          await window.dbUpdate(driverRef, {
+            IsActive: false,
+            Status: 'Inactive',
+            DeletedAt: new Date().toISOString()
+          });
+
+          if (userIdToDelete) {
+            const userRef = window.dbRef(window.db, `users/${userIdToDelete}`);
+            await window.dbUpdate(userRef, {
+              IsActive: false,
+              Status: 'Inactive',
+              DeletedAt: new Date().toISOString()
+            });
+          }
+
+          // Close modal and let realtime listeners update local state
+          setConfirmDelete({ open: false, index: null });
+          window.showAlert(`Driver ${driverToDelete.name} has been deactivated (soft-deleted).`, 'success');
+        } catch (error) {
+          console.error('Error deleting driver:', error);
+          window.showAlert('Error deleting driver: ' + (error && error.message ? error.message : error), 'error');
+          setConfirmDelete({ open: false, index: null });
+        }
+      };
+
+      const rawSegment = window.location.pathname.split("/").pop() || window.location.href.split("/").pop() || '';
+      const normalize = (s) => decodeURIComponent((s || '').toString()).toLowerCase().trim();
+      const currentPage = normalize(rawSegment);
+
+      const getLinkClass = (page) => {
+        const isActive = currentPage === normalize(page);
+        return "flex items-center gap-3 px-4 py-3 rounded-lg transition-colors " +
+          (isActive ? "bg-yellow-500 text-gray-900 font-semibold" : "text-gray-300 hover:bg-gray-700");
+      };
+
+      return (
+        <div className="flex min-h-screen bg-[#0a0e1a]">
+          {/* Sidebar */}
+          <aside className="w-72 bg-[#0e1420] text-white p-6 flex flex-col border-r border-gray-900">
+            <div className="flex items-center gap-3 mb-10">
+              <div className="w-14 h-14 rounded-2xl flex items-center justify-center overflow-hidden">
+                <img src="tricy.png" alt="Pasakay" className="w-full h-full object-cover bg-yellow-500 p-1" />
+              </div>
+              <div>
+                <h1 className="text-2xl font-bold text-yellow-500">PASAKAY</h1>
+                <p className="text-sm text-gray-400">Admin Dashboard</p>
+              </div>
+            </div>
+
+            <nav className="flex flex-col gap-2">
+              <a href="dashboard.html" className={getLinkClass("dashboard.html")}>
+                <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M3 12l2-2m0 0l7-7 7 7M5 10v10a1 1 0 001 1h3m10-11l2 2m-2-2v10a1 1 0 01-1 1h-3m-6 0a1 1 0 001-1v-4a1 1 0 011-1h2a1 1 0 011 1v4a1 1 0 001 1m-6 0h6" />
+                </svg>
+                Dashboard
+              </a>
+              <a href="driver management.html" className={getLinkClass("driver management.html")}>
+                <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M17 20h5v-2a3 3 0 00-5.356-1.857M17 20H7m10 0v-2c0-.656-.126-1.283-.356-1.857M7 20H2v-2a3 3 0 015.356-1.857M7 20v-2c0-.656.126-1.283.356-1.857m0 0a5.002 5.002 0 019.288 0M15 7a3 3 0 11-6 0 3 3 0 016 0zm6 3a2 2 0 11-4 0 2 2 0 014 0zM7 10a2 2 0 11-4 0 2 2 0 014 0z" />
+                </svg>
+                Drivers
+              </a>
+              <a href="passenger management.html" className={getLinkClass("passenger management.html")}>
+                <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M16 7a4 4 0 11-8 0 4 4 0 018 0zM12 14a7 7 0 00-7 7h14a7 7 0 00-7-7z" />
+                </svg>
+                Passengers
+              </a>
+              <a href="Driver application.html" className={getLinkClass("Driver application.html")}>
+                <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
+                </svg>
+                Membership
+              </a>
+              <a href="booking management.html" className={getLinkClass("booking management.html")}>
+                <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2" />
+                </svg>
+                Bookings
+              </a>
+              <a href="Logs.html" className={getLinkClass("Logs.html")}>
+                <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z" />
+                </svg>
+                Logs
+              </a>
+              <a href="Fare Matrix.html" className={getLinkClass("Fare Matrix.html")}>
+                <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.065 2.572c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.572 1.065c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.065-2.572c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z" />
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 12a3 3 0 11-6 0 3 3 0 016 0z" />
+                </svg>
+                Fare Matrix
+              </a>
+              <a href="log out.html" className={getLinkClass("log out.html")}>
+                <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M17 16l4-4m0 0l-4-4m4 4H7m6 4v1a3 3 0 01-3 3H6a3 3 0 01-3-3V7a3 3 0 013-3h4a3 3 0 013 3v1" />
+                </svg>
+                Log out
+              </a>
+            </nav>
+          </aside>
+
+          {/* Main Content */}
+          <main className="flex-1 bg-[#1a202e] p-8">
+            {/* Header */}
+            <header className="flex justify-between items-center mb-8">
+              <h2 className="text-3xl font-bold text-white">Driver Management</h2>
+              <div className="flex items-center gap-3 bg-yellow-500 px-4 py-2 rounded-lg">
+                <div className="w-10 h-10 bg-gray-900 text-yellow-500 rounded-full flex items-center justify-center font-bold text-lg">
+                  A
+                </div>
+                <span className="font-semibold text-gray-900">Admin</span>
+              </div>
+            </header>
+
+            {/* Driver List */}
+            <div className="bg-[#1e2538] p-8 rounded-xl">
+              <div className="flex justify-between items-center mb-6">
+                <h3 className="text-2xl font-bold text-white">Driver Management ({drivers.length} drivers)</h3>
+                <div className="flex gap-3">
+                  <button onClick={() => setShowExportModal(true)} className="bg-yellow-500 hover:bg-yellow-600 px-6 py-3 rounded-lg font-semibold text-gray-900 flex items-center gap-2">
+                    <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 10v6m0 0l-3-3m3 3l3-3m2 8H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
+                    </svg>
+                    EXPORT DATA
+                  </button>
+                  <button onClick={() => setShowAddModal(true)} className="bg-yellow-500 hover:bg-yellow-600 px-6 py-3 rounded-lg font-semibold text-gray-900 flex items-center gap-2">
+                    <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 4v16m8-8H4" />
+                    </svg>
+                    ADD APPROVED DRIVERS
+                  </button>
+                </div>
+              </div>
+
+              <div className={drivers.length > 4 ? "space-y-4 max-h-96 overflow-y-auto pr-2" : "space-y-4"}>
+                {drivers.map((driver, index) => (
+                      <li key={index} className="flex justify-between items-center bg-[#252d42] p-6 rounded-lg hover:bg-[#2d3548] transition-colors overflow-hidden">
+                        <div className="flex items-center gap-4 flex-1 min-w-0 overflow-hidden">
+                      <div className={`w-12 h-12 rounded-full flex items-center justify-center font-bold text-white text-lg ${driver.status === "Active" ? "bg-green-500" : "bg-gray-500"}`}>
+                        {driver.name.split(" ").map(n => n[0]).join("").slice(0, 2)}
+                      </div>
+                      <div className="min-w-0 overflow-hidden">
+                        <h4 className="font-bold text-white text-lg truncate">{driver.name}</h4>
+                        <p className="text-sm text-gray-400 truncate">
+                          Tricycle #{driver.tricycle} | License: {driver.license} | Phone: {stripPhonePrefix(driver.contact)}
+                        </p>
+                      </div>
+                    </div>
+                      <div className="flex items-center gap-3 flex-shrink-0 ml-4">
+                        <span className={`px-3 h-8 flex items-center rounded-lg text-sm font-bold ${driver.status === "Active" ? "bg-green-500 text-white" : "bg-gray-500 text-white"}`}>
+                          {driver.status === "Active" ? "ONLINE" : "OFFLINE"}
+                        </span>
+                        <span className={`px-3 h-8 flex items-center rounded-lg text-sm font-bold ${driver.status === "Active" ? "bg-green-500 text-white" : "bg-gray-500 text-white"}`}>
+                          {driver.status === "Active" ? "ACTIVE" : "INACTIVE"}
+                        </span>
+                        <button onClick={() => handleEditDriver(index)} className="bg-yellow-500 hover:bg-yellow-600 px-4 h-8 rounded-lg text-sm font-semibold text-gray-900 flex items-center gap-2">
+                        <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M11 5H6a2 2 0 00-2 2v11a2 2 0 002 2h11a2 2 0 002-2v-5m-1.414-9.414a2 2 0 112.828 2.828L11.828 15H9v-2.828l8.586-8.586z" />
+                        </svg>
+                        Edit
+                      </button>
+                      <button onClick={() => handleDeleteDriver(index)} className="bg-red-600 hover:bg-red-700 px-4 h-8 rounded-lg text-sm font-semibold text-white flex items-center gap-2">
+                        <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
+                        </svg>
+                        Delete
+                      </button>
+                    </div>
+                  </li>
+                ))}
+              </div>
+            </div>
+
+            {/* Modals */}
+            {showAddModal && (
+              <ImportApprovedModal onClose={() => setShowAddModal(false)} />
+            )}
+            {selectedDriver && (
+              <EditDriverModal 
+                driver={selectedDriver} 
+                driverIndex={selectedDriverIndex}
+                onClose={() => {
+                  setSelectedDriver(null);
+                  setSelectedDriverIndex(null);
+                }} 
+                onSave={handleSaveDriver}
+              />
+            )}
+            {showExportModal && <ExportDataModal drivers={drivers} onClose={() => setShowExportModal(false)} />}
+            {confirmDelete.open && (
+              <div className="fixed inset-0 flex items-center justify-center bg-black bg-opacity-80 z-50">
+                <div className="bg-[#1e2538] p-8 rounded-xl w-[520px]">
+                  <h2 className="text-2xl font-bold mb-4 text-white">Confirm Delete</h2>
+                  <p className="text-gray-300 mb-6">Are you sure you want to delete <span className="font-semibold text-white">{drivers[confirmDelete.index] ? drivers[confirmDelete.index].name : ''}</span>?</p>
+                  <div className="flex justify-end gap-3">
+                    <button onClick={() => setConfirmDelete({ open: false, index: null })} className="bg-gray-600 hover:bg-gray-700 px-6 py-2 rounded-lg font-semibold text-white">Cancel</button>
+                    <button onClick={() => performDeleteDriver(confirmDelete.index)} className="bg-red-600 hover:bg-red-700 px-6 py-2 rounded-lg font-semibold text-white">Delete</button>
+                  </div>
+                </div>
+              </div>
+            )}
+          </main>
+        </div>
+      );
+    };
+
+    ReactDOM.createRoot(document.getElementById("root")).render(<DriverManagement />);
+  </script>
+</body>
+</html>

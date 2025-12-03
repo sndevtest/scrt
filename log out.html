@@ -1,0 +1,72 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+  <title>Pasakay - Logout</title>
+  <link rel="icon" href="tricy.png" type="image/png">
+
+  <script src="firebase-init.js"></script>
+  <!-- React CDN -->
+  <script crossorigin src="https://unpkg.com/react@18/umd/react.development.js"></script>
+  <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.development.js"></script>
+
+  <!-- Babel -->
+  <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+
+  <!-- Tailwind -->
+  <script src="https://cdn.tailwindcss.com"></script>
+
+  <style>
+    body {
+      font-family: "Inter", sans-serif;
+      background: #0a0e1a;
+    }
+  </style>
+</head>
+<body>
+  <div id="root"></div>
+
+  <script type="text/babel">
+    const Logout = () => {
+      // go back (No)
+      const handleNo = () => {
+        window.history.back(); 
+      };
+
+      // go to login.html (Yes)
+      const handleYes = () => {
+        window.location.href = "log in.html"; 
+      };
+
+      return (
+        <div className="flex items-center justify-center min-h-screen text-white">
+          <div className="bg-[#1e2538] p-10 rounded-xl shadow-lg text-center">
+            <h2 className="text-2xl font-bold mb-8">
+              Are you sure you want to log-out?
+            </h2>
+
+            <div className="flex justify-center gap-8">
+              <button
+                onClick={handleNo}
+                className="px-8 py-3 rounded-lg bg-red-600 text-white font-bold text-lg hover:bg-red-700 transition"
+              >
+                No
+              </button>
+
+              <button
+                onClick={handleYes}
+                className="px-8 py-3 rounded-lg bg-green-600 text-white font-bold text-lg hover:bg-green-700 transition"
+              >
+                Yes
+              </button>
+            </div>
+          </div>
+        </div>
+      );
+    };
+
+    ReactDOM.createRoot(document.getElementById("root")).render(<Logout />);
+  </script>
+</body>
+</html>

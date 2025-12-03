@@ -1,0 +1,254 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+  <title>Pasakay - Fare Matrix</title>
+  <link rel="icon" href="tricy.png" type="image/png">
+
+  <!-- React -->
+  <script crossorigin src="https://unpkg.com/react@18/umd/react.development.js"></script>
+  <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.development.js"></script>
+
+  <script src="ui-modals.js"></script>
+
+  <!-- Babel -->
+  <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+
+  <!-- Tailwind -->
+  <script src="https://cdn.tailwindcss.com"></script>
+
+  <style>
+    body {
+      font-family: "Inter", sans-serif;
+      background: #0a0e1a;
+      margin: 0;
+    }
+    
+    /* Customized Scrollbar */
+    ::-webkit-scrollbar {
+      width: 10px;
+      height: 10px;
+    }
+    
+    ::-webkit-scrollbar-track {
+      background: #1a2333;
+      border-radius: 10px;
+    }
+    
+    ::-webkit-scrollbar-thumb {
+      background: linear-gradient(180deg, #fbbf24 0%, #f59e0b 100%);
+      border-radius: 10px;
+    }
+    
+    ::-webkit-scrollbar-thumb:hover {
+      background: linear-gradient(180deg, #fcd34d 0%, #fbbf24 100%);
+    }
+    
+    /* Firefox Scrollbar */
+    * {
+      scrollbar-color: #fbbf24 #1a2333;
+      scrollbar-width: thin;
+    }
+  </style>
+</head>
+<body>
+  <div id="root"></div>
+
+  <script type="text/babel">
+    const SystemSettings = () => {
+      const [showModal, setShowModal] = React.useState(false);
+      const [modalTitle, setModalTitle] = React.useState("");
+      const [modalValue, setModalValue] = React.useState("");
+
+      // Get current page for active link highlight
+      const rawSegment = window.location.pathname.split("/").pop() || window.location.href.split("/").pop() || '';
+      const normalize = (s) => decodeURIComponent((s || '').toString()).toLowerCase().trim();
+      const currentPage = normalize(rawSegment);
+
+      const getLinkClass = (page) => {
+        const isActive = currentPage === normalize(page);
+        return "flex items-center gap-3 px-4 py-3 rounded-lg transition-colors " +
+          (isActive ? "bg-yellow-500 text-gray-900 font-semibold" : "text-gray-300 hover:bg-gray-700");
+      };
+
+      const handleEdit = (title, currentValue) => {
+        setModalTitle(title);
+        setModalValue(currentValue);
+        setShowModal(true);
+      };
+
+      return (
+        <div className="flex min-h-screen bg-[#0a0e1a]">
+          {/* Sidebar */}
+          <aside className="w-72 bg-[#0e1420] text-white p-6 flex flex-col border-r border-gray-900">
+            <div className="flex items-center gap-3 mb-10">
+              <div className="w-14 h-14 rounded-2xl flex items-center justify-center overflow-hidden">
+                <img src="tricy.png" alt="Pasakay" className="w-full h-full object-cover bg-yellow-500 p-1" />
+              </div>
+              <div>
+                <h1 className="text-2xl font-bold text-yellow-500">PASAKAY</h1>
+                <p className="text-sm text-gray-400">Admin Dashboard</p>
+              </div>
+            </div>
+
+            <nav className="flex flex-col gap-2">
+              <a href="dashboard.html" className={getLinkClass("dashboard.html")}>
+                <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M3 12l2-2m0 0l7-7 7 7M5 10v10a1 1 0 001 1h3m10-11l2 2m-2-2v10a1 1 0 01-1 1h-3m-6 0a1 1 0 001-1v-4a1 1 0 011-1h2a1 1 0 011 1v4a1 1 0 001 1m-6 0h6" />
+                </svg>
+                Dashboard
+              </a>
+              <a href="driver management.html" className={getLinkClass("driver management.html")}>
+                <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M17 20h5v-2a3 3 0 00-5.356-1.857M17 20H7m10 0v-2c0-.656-.126-1.283-.356-1.857M7 20H2v-2a3 3 0 015.356-1.857M7 20v-2c0-.656.126-1.283.356-1.857m0 0a5.002 5.002 0 019.288 0M15 7a3 3 0 11-6 0 3 3 0 016 0zm6 3a2 2 0 11-4 0 2 2 0 014 0zM7 10a2 2 0 11-4 0 2 2 0 014 0z" />
+                </svg>
+                Drivers
+              </a>
+              <a href="passenger management.html" className={getLinkClass("passenger management.html")}>
+                <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M16 7a4 4 0 11-8 0 4 4 0 018 0zM12 14a7 7 0 00-7 7h14a7 7 0 00-7-7z" />
+                </svg>
+                Passengers
+              </a>
+              <a href="Driver application.html" className={getLinkClass("Driver application.html")}>
+                <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
+                </svg>
+                Membership
+              </a>
+              <a href="booking management.html" className={getLinkClass("booking management.html")}>
+                <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2" />
+                </svg>
+                Bookings
+              </a>
+              <a href="Logs.html" className={getLinkClass("Logs.html")}>
+                <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z" />
+                </svg>
+                Logs
+              </a>
+              <a href="Fare Matrix.html" className={getLinkClass("Fare Matrix.html")}>
+                <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.065 2.572c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.572 1.065c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.065-2.572c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z" />
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 12a3 3 0 11-6 0 3 3 0 016 0z" />
+                </svg>
+                Fare Matrix
+              </a>
+              <a href="log out.html" className={getLinkClass("log out.html")}>
+                <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M17 16l4-4m0 0l-4-4m4 4H7m6 4v1a3 3 0 01-3 3H6a3 3 0 01-3-3V7a3 3 0 013-3h4a3 3 0 013 3v1" />
+                </svg>
+                Log out
+              </a>
+            </nav>
+          </aside>
+
+          {/* Main content */}
+          <main className="flex-1 bg-[#1a202e] p-8">
+            {/* Header */}
+            <header className="flex justify-between items-center mb-8">
+              <h2 className="text-3xl font-bold text-white">Fare Matrix</h2>
+              <div className="flex items-center gap-3 bg-yellow-500 px-4 py-2 rounded-lg">
+                <div className="w-10 h-10 bg-gray-900 text-yellow-500 rounded-full flex items-center justify-center font-bold text-lg">
+                  A
+                </div>
+                <span className="font-semibold text-gray-900">Admin</span>
+              </div>
+            </header>
+
+            {/* System Settings Section */}
+            <div className="bg-[#1e2538] p-8 rounded-xl">
+              <h3 className="text-2xl font-bold mb-6 text-white">Fare Matrix Settings</h3>
+
+              {/* Settings Cards */}
+              <div className="grid gap-6">
+                {/* Base Fare Rate */}
+                <div className="bg-[#252d42] p-6 rounded-lg border border-gray-700 hover:bg-[#2d3548] transition-colors">
+                  <div className="flex items-center gap-3 mb-3">
+                    <svg className="w-6 h-6 text-yellow-500" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 8c-1.657 0-3 .895-3 2s1.343 2 3 2 3 .895 3 2-1.343 2-3 2m0-8c1.11 0 2.08.402 2.599 1M12 8V7m0 1v8m0 0v1m0-1c-1.11 0-2.08-.402-2.599-1M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
+                    </svg>
+                    <h4 className="text-xl font-bold text-white">Base Fare Rate</h4>
+                  </div>
+                  <div className="space-y-2">
+                    <p className="text-gray-300">
+                      <span className="font-semibold text-yellow-400">Special Trip:</span> ₱30 for the first km (3-4 Passengers)
+                    </p>
+                    <p className="text-gray-300">
+                      <span className="font-semibold text-yellow-400">Additional:</span> ₱5 for every kilometer
+                    </p>
+                  </div>
+                </div>
+
+                {/* Service Area */}
+                <div className="bg-[#252d42] p-6 rounded-lg border border-gray-700 hover:bg-[#2d3548] transition-colors">
+                  <div className="flex items-center gap-3 mb-3">
+                    <svg className="w-6 h-6 text-green-500" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M17.657 16.657L13.414 20.9a1.998 1.998 0 01-2.827 0l-4.244-4.243a8 8 0 1111.314 0z" />
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 11a3 3 0 11-6 0 3 3 0 016 0z" />
+                    </svg>
+                    <h4 className="text-xl font-bold text-white">Service Area</h4>
+                  </div>
+                  <div className="space-y-2">
+                    <p className="text-gray-300">
+                      <span className="font-semibold text-green-400">Current Area:</span> Bagong Silangan, Quezon City
+                    </p>
+                    <p className="text-gray-400 text-sm">
+                      Defines the operational boundary for tricycle services
+                    </p>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </main>
+
+          {/* Modal */}
+          {showModal && (
+            <div className="fixed inset-0 bg-black bg-opacity-80 flex items-center justify-center z-50">
+              <div className="bg-[#1e2538] p-8 rounded-xl w-[500px] relative">
+                <button 
+                  onClick={() => setShowModal(false)}
+                  className="absolute top-4 right-4 text-gray-400 hover:text-white text-3xl font-light"
+                >
+                  &times;
+                </button>
+                <h2 className="text-2xl font-bold mb-6 text-white">Edit {modalTitle}</h2>
+                <div className="mb-6">
+                  <label className="block text-sm font-medium text-gray-300 mb-2">Value</label>
+                  <input 
+                    type="text" 
+                    value={modalValue} 
+                    onChange={(e) => setModalValue(e.target.value)}
+                    className="w-full px-4 py-3 rounded-lg bg-[#252d42] text-white border border-gray-700 focus:border-yellow-500 focus:outline-none"
+                  />
+                </div>
+                <div className="flex justify-between gap-3">
+                  <button 
+                    onClick={() => setShowModal(false)}
+                    className="bg-red-600 hover:bg-red-700 px-6 py-3 rounded-lg font-semibold text-white transition-colors"
+                  >
+                    Cancel
+                  </button>
+                  <button 
+                    onClick={() => {
+                      window.showAlert(`Saved: ${modalTitle} = ${modalValue}`, 'success');
+                      setShowModal(false);
+                    }}
+                    className="bg-green-600 hover:bg-green-700 px-6 py-3 rounded-lg font-semibold text-white transition-colors"
+                  >
+                    Save Changes
+                  </button>
+                </div>
+              </div>
+            </div>
+          )}
+        </div>
+      );
+    };
+
+    ReactDOM.createRoot(document.getElementById("root")).render(<SystemSettings />);
+  </script>
+</body>
+</html>

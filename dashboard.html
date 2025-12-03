@@ -1,0 +1,724 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+  <title>Pasakay - Dashboard</title>
+  <link rel="icon" href="tricy.png" type="image/png">
+  <script type="module">
+    import { initializeApp } from "https://www.gstatic.com/firebasejs/12.6.0/firebase-app.js";
+    import { getAuth } from "https://www.gstatic.com/firebasejs/12.6.0/firebase-auth.js";
+    import {
+      getDatabase,
+      ref,
+      onValue,
+      get,
+      query,
+      orderByChild,
+      equalTo
+    } from "https://www.gstatic.com/firebasejs/12.6.0/firebase-database.js";
+
+    const firebaseConfig = {
+      apiKey: "AIzaSyBS-g5bFBaJ6a35hWmjvoN-s8FuMEuxtew",
+      authDomain: "pasakay-project-ph.firebaseapp.com",
+      databaseURL: "https://pasakay-project-ph-default-rtdb.firebaseio.com",
+      projectId: "pasakay-project-ph",
+      storageBucket: "pasakay-project-ph.firebasestorage.app",
+      messagingSenderId: "189297787561",
+      appId: "1:189297787561:web:ddad5de3fdf638c6d8dfb8",
+      measurementId: "G-2VWQ0C8EZE"
+    };
+
+    // Initialize Firebase (no auth required for reads in this dashboard)
+    const app = initializeApp(firebaseConfig);
+    const auth = getAuth(app);
+    const db = getDatabase(app);
+
+    // Expose DB helpers to the non-module React script
+    window.db = db;
+    window.dbRef = ref;
+    window.dbOnValue = onValue;
+    window.dbGet = get;
+    window.dbQuery = query;
+    window.dbOrderByChild = orderByChild;
+    window.dbEqualTo = equalTo;
+    // Simple app logger for debugging (can be inspected in console)
+    window.appLog = (...args) => {
+      try { console.debug('[PASAKAY]', ...args); } catch(e) {}
+    };
+  </script>
+  <!-- React + Babel + Tailwind -->
+  <script crossorigin src="https://unpkg.com/react@18/umd/react.development.js"></script>
+  <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.development.js"></script>
+  <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+  <script src="https://cdn.tailwindcss.com"></script>
+
+  <style>
+    body {
+      font-family: "Inter", sans-serif;
+      background: #0a0e1a;
+    }
+    
+    /* Customized Scrollbar */
+    ::-webkit-scrollbar {
+      width: 10px;
+      height: 10px;
+    }
+    
+    ::-webkit-scrollbar-track {
+      background: #1a2333;
+      border-radius: 10px;
+    }
+    
+    ::-webkit-scrollbar-thumb {
+      background: linear-gradient(180deg, #fbbf24 0%, #f59e0b 100%);
+      border-radius: 10px;
+    }
+    
+    ::-webkit-scrollbar-thumb:hover {
+      background: linear-gradient(180deg, #fcd34d 0%, #fbbf24 100%);
+    }
+    
+    /* Firefox Scrollbar */
+    * {
+      scrollbar-color: #2e3c57 #1a2333;
+      scrollbar-width: thin;
+    }
+  </style>
+</head>
+<body>
+  <div id="root"></div>
+
+  <script type="text/babel">
+    const Dashboard = () => {
+      const currentPage = "dashboard.html";
+      const [searchTerm, setSearchTerm] = React.useState("");
+      const [selectedDriver, setSelectedDriver] = React.useState(null);
+      const [selectedPassenger, setSelectedPassenger] = React.useState(null);
+      const [selectedBooking, setSelectedBooking] = React.useState(null);
+
+      // Helper: strip +63 prefix for display
+      const stripPhonePrefix = (phone) => {
+        if (!phone) return '';
+        const str = phone.toString();
+        if (str.startsWith('+63')) return str.slice(3);
+        return str;
+      };
+
+      // Raw objects from DB
+      const [rawUsers, setRawUsers] = React.useState({});
+      const [rawDrivers, setRawDrivers] = React.useState({});
+      const [rawPassengers, setRawPassengers] = React.useState({});
+      const [rawBookings, setRawBookings] = React.useState({});
+      const [rawFeedback, setRawFeedback] = React.useState({});
+
+      // Derived arrays for UI
+      const [drivers, setDrivers] = React.useState([]);
+      const [passengers, setPassengers] = React.useState([]);
+      const [bookings, setBookings] = React.useState([]);
+
+      // Set up realtime listeners to DB nodes
+      React.useEffect(() => {
+        if (!window.db || !window.dbRef || !window.dbOnValue) return;
+
+        const usersRef = window.dbRef(window.db, 'users');
+        const driversRef = window.dbRef(window.db, 'drivers');
+        const passengersRef = window.dbRef(window.db, 'passengers');
+        const bookingsRef = window.dbRef(window.db, 'booking');
+        const feedbackRef = window.dbRef(window.db, 'feedback');
+
+        const unsubUsers = window.dbOnValue(usersRef, snap => {
+          try {
+            const val = snap.val() || {};
+            window.appLog('users snapshot', Object.keys(val).length);
+            setRawUsers(val);
+          } catch(err) {
+            console.error('Error processing users snapshot', err);
+          }
+        });
+
+        const unsubDrivers = window.dbOnValue(driversRef, snap => {
+          try {
+            const val = snap.val() || {};
+            window.appLog('drivers snapshot', Object.keys(val).length);
+            setRawDrivers(val);
+          } catch(err) {
+            console.error('Error processing drivers snapshot', err);
+          }
+        });
+
+        const unsubPassengers = window.dbOnValue(passengersRef, snap => {
+          try {
+            const val = snap.val() || {};
+            window.appLog('passengers snapshot', Object.keys(val).length);
+            setRawPassengers(val);
+          } catch(err) {
+            console.error('Error processing passengers snapshot', err);
+          }
+        });
+
+        const unsubBookings = window.dbOnValue(bookingsRef, snap => {
+          try {
+            const val = snap.val() || {};
+            window.appLog('bookings snapshot', Object.keys(val).length);
+            setRawBookings(val);
+          } catch(err) {
+            console.error('Error processing bookings snapshot', err);
+          }
+        });
+
+        const unsubFeedback = window.dbOnValue(feedbackRef, snap => {
+          try {
+            const val = snap.val() || {};
+            window.appLog('feedback snapshot', Object.keys(val).length);
+            setRawFeedback(val);
+          } catch(err) {
+            console.error('Error processing feedback snapshot', err);
+          }
+        });
+
+        return () => {
+          try { unsubUsers(); } catch(e) { console.warn(e); }
+          try { unsubDrivers(); } catch(e) { console.warn(e); }
+          try { unsubPassengers(); } catch(e) { console.warn(e); }
+          try { unsubBookings(); } catch(e) { console.warn(e); }
+          try { unsubFeedback(); } catch(e) { console.warn(e); }
+        };
+      }, []);
+
+      // Derive arrays for UI whenever raw data changes
+      const [appError, setAppError] = React.useState(null);
+
+      React.useEffect(() => {
+        // helpers
+        const makeFullName = (u) => {
+          if (!u) return 'Unknown';
+          return [u.Firstname, u.Middlename, u.Lastname].filter(Boolean).join(' ');
+        };
+
+        // Build bookings array
+        const bookingsArr = Object.entries(rawBookings || {}).map(([key, b]) => {
+          const passengerRec = (rawPassengers && rawPassengers[b.PassengerID]) || null;
+          const passengerUser = passengerRec ? rawUsers[passengerRec.UserID] : null;
+          const driverRec = rawDrivers && rawDrivers[b.DriverID];
+          const driverUser = driverRec ? rawUsers[driverRec.UserID] : null;
+          const requested = b.RequestedAt || '';
+          const date = requested ? new Date(requested).toLocaleDateString() : '';
+          const time = requested ? new Date(requested).toLocaleTimeString([], {hour: '2-digit', minute:'2-digit'}) : '';
+          return {
+            id: key,
+            passenger: passengerUser ? makeFullName(passengerUser) : (b.PassengerName || 'Passenger'),
+            driver: driverUser ? makeFullName(driverUser) : (driverUser ? makeFullName(driverUser) : 'Driver'),
+            pickup: b.PickUpLocation || b.pickup || '',
+            dropoff: b.DropOffLocation || b.dropoff || '',
+            fare: typeof b.TotalFare !== 'undefined' ? `₱${Number(b.TotalFare).toFixed(2)}` : (b.fare || ''),
+            date,
+            time,
+            status: b.Status || 'Unknown',
+            distance: b.DistanceKm ? `${b.DistanceKm}km` : (b.distance || ''),
+            raw: b
+          };
+        }).sort((a,b) => {
+          // sort by requested date desc
+          const da = new Date((a.raw && a.raw.RequestedAt) || 0).getTime();
+          const dbt = new Date((b.raw && b.raw.RequestedAt) || 0).getTime();
+          return dbt - da;
+        });
+
+        // Build drivers array with ratings and reviews from feedback
+        const driversArr = Object.entries(rawDrivers || {})
+          // include only drivers that are active and whose linked user record still exists and is active
+          .filter(([key, d]) => d && d.IsActive === true && d.UserID && rawUsers && rawUsers[d.UserID] && rawUsers[d.UserID].IsActive !== false && !rawUsers[d.UserID].DeletedAt)
+          .map(([key, d]) => {
+            const user = rawUsers && rawUsers[d.UserID];
+            const name = makeFullName(user);
+            // total rides: count bookings for this driver
+            const totalRides = Object.values(rawBookings || {}).filter(b => String(b.DriverID) === String(key)).length;
+            // feedback for this driver's bookings
+            const feedbacks = Object.values(rawFeedback || {}).filter(f => {
+              const bid = String(f.BookingID);
+              const booking = rawBookings && rawBookings[bid];
+              return booking && String(booking.DriverID) === String(key) && (typeof f.Rating !== 'undefined');
+            });
+            const rating = feedbacks.length ? (feedbacks.reduce((s, f) => s + Number(f.Rating || 0), 0) / feedbacks.length) : 0;
+            const reviews = feedbacks.map(f => f.Comments || (f.Message || '')).filter(Boolean);
+            return {
+              id: key,
+              name,
+              tricycle: d.TricycleNumber || d.Tricycle || '',
+              license: d.LicenseNumber || d.License || '',
+              contact: user ? user.MobileNumber : '',
+              location: (user && user.Address) || (user && user.Location) || '',
+              status: d.Status === 'Active' ? 'Online' : (d.Status || 'Offline'),
+              joined: user ? (user.CreatedAt || '') : '',
+              totalRides,
+              rating,
+              reviews,
+              image: 'tricy.png'
+            };
+          });
+
+        // Build passengers array
+        const passengersArr = Object.entries(rawPassengers || {})
+          // exclude passenger records with missing or deactivated user accounts
+          .filter(([key, p]) => p && p.UserID && rawUsers && rawUsers[p.UserID] && rawUsers[p.UserID].IsActive !== false && !rawUsers[p.UserID].DeletedAt)
+          .map(([key, p]) => {
+          const user = rawUsers && rawUsers[p.UserID];
+          const totalRides = Object.values(rawBookings || {}).filter(b => String(b.PassengerID) === String(key)).length;
+          return {
+            id: key,
+            name: user ? makeFullName(user) : 'Passenger',
+            contact: user ? user.MobileNumber : '',
+            location: (user && user.Address) || '',
+            joined: user ? (user.CreatedAt || '') : '',
+            totalRides
+          };
+        });
+
+        try {
+          window.appLog('derived counts', { bookings: bookingsArr.length, drivers: driversArr.length, passengers: passengersArr.length });
+        } catch(e) {}
+        setBookings(bookingsArr);
+        setDrivers(driversArr);
+        setPassengers(passengersArr);
+      }, [rawUsers, rawDrivers, rawPassengers, rawBookings, rawFeedback]);
+
+      // Small UI alert for errors
+      React.useEffect(() => {
+        if (appError) {
+          console.error('App error:', appError);
+        }
+      }, [appError]);
+
+      // Search data derived
+      const data = React.useMemo(() => {
+        return [
+          ...drivers.map(d => ({ type: 'Driver', name: d.name, id: d.id })),
+          ...passengers.map(p => ({ type: 'Passenger', name: p.name, id: p.id })),
+          ...bookings.map(b => ({ type: 'Booking', name: `Booking #${b.id} - ${b.status}`, id: b.id })),
+        ];
+      }, [drivers, passengers, bookings]);
+
+      // Filtered search results
+      const filteredResults = data.filter(item =>
+        item.name.toLowerCase().includes(searchTerm.toLowerCase()) ||
+        item.type.toLowerCase().includes(searchTerm.toLowerCase())
+      );
+
+      const getLinkClass = (page) =>
+        "flex items-center gap-3 px-4 py-3 rounded-lg transition-colors " +
+        (currentPage === page
+          ? "bg-yellow-500 text-gray-900 font-semibold"
+          : "text-gray-300 hover:bg-gray-700");
+
+      const renderStars = (rating) => {
+        const full = Math.floor(rating);
+        const half = rating % 1 >= 0.5;
+        return (
+          <>
+            {[...Array(full)].map((_, i) => <span key={i} className="text-yellow-400">★</span>)}
+            {half && <span className="text-yellow-400">☆</span>}
+            {[...Array(5 - full - (half ? 1 : 0))].map((_, i) => <span key={i} className="text-gray-400">★</span>)}
+          </>
+        );
+      };
+
+      // Map booking status to Tailwind badge classes (includes text color)
+      const statusBadgeClass = (status) => {
+        const s = (status || '').toString().toLowerCase();
+        if (s === 'completed') return 'bg-green-500 text-white';
+        if (s === 'pending') return 'bg-yellow-400 text-black';
+        if (s === 'cancelled' || s === 'canceled') return 'bg-red-600 text-white';
+        if (s.includes('progress')) return 'bg-gray-500 text-white';
+        return 'bg-gray-500 text-white';
+      };
+
+      const handleSearchItemClick = (item) => {
+        if (item.type === "Driver") {
+          setSelectedDriver(drivers.find(d => d.name === item.name));
+          setSelectedPassenger(null);
+          setSelectedBooking(null);
+        } else if (item.type === "Passenger") {
+          setSelectedPassenger(passengers.find(p => p.name === item.name));
+          setSelectedDriver(null);
+          setSelectedBooking(null);
+        } else if (item.type === "Booking") {
+          setSelectedBooking(bookings.find(b => b.id === item.id));
+          setSelectedDriver(null);
+          setSelectedPassenger(null);
+        }
+      };
+
+      return (
+        <div className="flex min-h-screen text-white">
+
+          {/* Sidebar */}
+          <aside className="w-72 bg-[#0e1420] text-white p-6 flex flex-col border-r border-gray-900">
+            <div className="flex items-center gap-3 mb-10">
+              <div className="w-14 h-14 rounded-2xl flex items-center justify-center overflow-hidden">
+                <img src="tricy.png" alt="Pasakay" className="w-full h-full object-cover bg-yellow-500 p-1" />
+              </div>
+              <div>
+                <h1 className="text-2xl font-bold text-yellow-500">PASAKAY</h1>
+                <p className="text-sm text-gray-400">Admin Dashboard</p>
+              </div>
+            </div>
+            <nav className="flex flex-col gap-2">
+              <a href="dashboard.html" className={getLinkClass("dashboard.html")}>
+                <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M3 12l2-2m0 0l7-7 7 7M5 10v10a1 1 0 001 1h3m10-11l2 2m-2-2v10a1 1 0 01-1 1h-3m-6 0a1 1 0 001-1v-4a1 1 0 011-1h2a1 1 0 011 1v4a1 1 0 001 1m-6 0h6" />
+                </svg>
+                Dashboard
+              </a>
+              <a href="driver management.html" className={getLinkClass("driver management.html")}>
+                <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M17 20h5v-2a3 3 0 00-5.356-1.857M17 20H7m10 0v-2c0-.656-.126-1.283-.356-1.857M7 20H2v-2a3 3 0 015.356-1.857M7 20v-2c0-.656.126-1.283.356-1.857m0 0a5.002 5.002 0 019.288 0M15 7a3 3 0 11-6 0 3 3 0 016 0zm6 3a2 2 0 11-4 0 2 2 0 014 0zM7 10a2 2 0 11-4 0 2 2 0 014 0z" />
+                </svg>
+                Drivers
+              </a>
+              <a href="passenger management.html" className={getLinkClass("passenger management.html")}>
+                <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M16 7a4 4 0 11-8 0 4 4 0 018 0zM12 14a7 7 0 00-7 7h14a7 7 0 00-7-7z" />
+                </svg>
+                Passengers
+              </a>
+              <a href="Driver application.html" className={getLinkClass("Driver application.html")}>
+                <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
+                </svg>
+                Membership
+              </a>
+              <a href="booking management.html" className={getLinkClass("booking management.html")}>
+                <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2" />
+                </svg>
+                Bookings
+              </a>
+              <a href="Logs.html" className={getLinkClass("Logs.html")}>
+                <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z" />
+                </svg>
+                Logs
+              </a>
+              <a href="Fare Matrix.html" className={getLinkClass("Fare Matrix.html")}>
+                <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.065 2.572c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.572 1.065c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.065-2.572c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z" />
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 12a3 3 0 11-6 0 3 3 0 016 0z" />
+                </svg>
+                Fare Matrix
+              </a>
+              <a href="log out.html" className={getLinkClass("log out.html")}>
+                <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M17 16l4-4m0 0l-4-4m4 4H7m6 4v1a3 3 0 01-3 3H6a3 3 0 01-3-3V7a3 3 0 013-3h4a3 3 0 013 3v1" />
+                </svg>
+                Log out
+              </a>
+            </nav>
+          </aside>
+
+          {/* Main Content */}
+          <main className="flex-1 bg-[#1a202e] p-8 flex justify-center">
+            <div className="w-full max-w-6xl">
+
+              {/* Header with Search */}
+              <header className="flex justify-between items-center mb-8 bg-[#1e2538] p-4 rounded-lg">
+                <h2 className="text-2xl font-bold">Bagong Silangan Overview</h2>
+                <div className="flex items-center gap-4 bg-[#1f2937] p-2 rounded-lg relative">
+                  <input
+                    type="text"
+                    placeholder="Search Drivers, Passengers, Bookings..."
+                    className="px-4 py-2 rounded-lg text-black w-80"
+                    value={searchTerm}
+                    onChange={(e) => setSearchTerm(e.target.value)}
+                  />
+                  <div className="flex items-center gap-2 bg-yellow-500 px-3 py-2 rounded-lg">
+                    <div className="w-8 h-8 bg-gray-200 text-black rounded-full flex items-center justify-center">A</div>
+                    <span>Admin</span>
+                  </div>
+
+                  {/* Search Dropdown */}
+                  {searchTerm && (
+                    <div className="absolute top-14 left-0 bg-white text-black rounded-lg w-80 shadow-lg max-h-64 overflow-y-auto z-10">
+                      {filteredResults.length > 0 ? (
+                        filteredResults.map((item, index) => (
+                          <div
+                            key={index}
+                            className="px-4 py-2 hover:bg-yellow-100 cursor-pointer"
+                            onClick={() => handleSearchItemClick(item)}
+                          >
+                            {item.name} <span className="text-gray-400 text-sm">({item.type})</span>
+                          </div>
+                        ))
+                      ) : (
+                        <div className="px-4 py-2 text-gray-500">No results found</div>
+                      )}
+                    </div>
+                  )}
+                </div>
+              </header>
+
+              {/* Search Results */}
+              {searchTerm && (
+                <div className="bg-[#1a1f2e] p-6 rounded-xl mb-8 shadow">
+                  <h3 className="text-xl font-bold mb-3">Search Results for "{searchTerm}"</h3>
+                  {filteredResults.length > 0 ? (
+                    <ul className="space-y-2">
+                      {filteredResults.map((item, index) => (
+                        <li key={index} className="flex justify-between border-b border-gray-700 pb-2">
+                          <span>{item.name}</span>
+                          <span className="text-gray-400">{item.type}</span>
+                        </li>
+                      ))}
+                    </ul>
+                  ) : (
+                    <p className="text-gray-400">No matches found.</p>
+                  )}
+                </div>
+              )}
+
+              {/* Dashboard Stats */}
+              <div className="grid grid-cols-1 md:grid-cols-3 gap-6 mb-8">
+                <div className="bg-[#1e2538] p-6 rounded-xl shadow flex justify-between items-center">
+                  <div>
+                    <p className="text-gray-400">TODAY'S RIDES</p>
+                    <h3 className="text-3xl font-bold">{(() => {
+                      try {
+                        const today = new Date().toISOString().slice(0,10);
+                        return bookings.filter(b => (b.raw && b.raw.RequestedAt && b.raw.RequestedAt.slice(0,10) === today)).length || 0;
+                      } catch(e) { return 0; }
+                    })()}</h3>
+                    <p className="text-green-400">Live count from DB</p>
+                  </div>
+                  <img src="today's rides.png" className="w-16 h-16" />
+                </div>
+
+                <div className="bg-[#1e2538] p-6 rounded-xl shadow flex justify-between items-center">
+                  <div>
+                    <p className="text-gray-400">ACTIVE DRIVERS</p>
+                    <h3 className="text-3xl font-bold">{drivers.filter(d => d.status === 'Online').length}</h3>
+                    <p className="text-green-400">Online drivers (live)</p>
+                  </div>
+                  <img src="tricy.png" className="w-16 h-16" />
+                </div>
+
+                <div className="bg-[#1e2538] p-6 rounded-xl shadow flex justify-between items-center">
+                  <div>
+                    <p className="text-gray-400">TOTAL BOOKINGS</p>
+                    <h3 className="text-3xl font-bold">{bookings.length}</h3>
+                    <p className="text-green-400">Total bookings (live)</p>
+                  </div>
+                  <img src="booking.png" className="w-16 h-16" />
+                </div>
+              </div>
+
+              {/* Active Drivers + Bookings */}
+              <div className="grid grid-cols-1 lg:grid-cols-2 gap-6 mb-8">
+                <div className="bg-[#1e2538] p-6 rounded-xl shadow">
+                  <div className="flex justify-between mb-4">
+                    <h3 className="text-xl font-bold">Active Drivers ({drivers.length})</h3>
+                    <a 
+                      href="driver management.html"
+                      className="bg-yellow-500 hover:bg-yellow-600 px-3 py-1 rounded text-white"
+                    >
+                      MANAGE ALL
+                    </a>
+                  </div>
+                  <div className="max-h-64 overflow-y-auto pr-2">
+                    <ul className="space-y-3">
+                      {drivers.map((d) => (
+                        <li key={d.id} className="flex flex-col border-b border-gray-700 pb-3">
+                          <div className="flex justify-between items-center">
+                            <span className="font-semibold">{d.name}</span>
+                            <span className={`${d.status === 'Online' ? 'bg-green-500' : 'bg-gray-500'} px-2 py-1 rounded text-sm`}>{d.status.toUpperCase()}</span>
+                          </div>
+                          <div className="text-gray-400 text-sm mt-1 flex gap-4">
+                            <span>Tricycle: <strong className="text-white">{d.tricycle}</strong></span>
+                            <span>License: <strong className="text-white">{d.license}</strong></span>
+                            <span>Phone: <strong className="text-white">{stripPhonePrefix(d.contact)}</strong></span>
+                          </div>
+                        </li>
+                      ))}
+                    </ul>
+                    {drivers.length === 0 && (
+                      <div className="text-gray-400 mt-3">No active drivers available</div>
+                    )}
+                  </div>
+                </div>
+
+                <div className="bg-[#1e2538] p-6 rounded-xl shadow">
+                  <div className="flex justify-between mb-4">
+                    <h3 className="text-xl font-bold">Recent Bookings</h3>
+                    <a 
+                      href="booking management.html"
+                      className="bg-yellow-500 hover:bg-yellow-600 px-3 py-1 rounded text-white"
+                    >
+                      VIEW ALL
+                    </a>
+                  </div>
+                    <div className="max-h-64 overflow-y-auto pr-2">
+                      <ul className="space-y-3">
+                        {bookings.slice(0,6).map((b) => (
+                          <li key={b.id} className="flex justify-between items-center border-b border-gray-700 pb-3">
+                            <button className="flex-1 text-left" onClick={() => setSelectedBooking(b)}>Booking#{b.id}</button>
+                            <span className={`${statusBadgeClass(b.status)} px-2 py-1 rounded text-sm`}>{b.status.toUpperCase()}</span>
+                          </li>
+                        ))}
+                      </ul>
+                      {bookings.length === 0 && (
+                        <div className="text-gray-400">No bookings yet</div>
+                      )}
+                    </div>
+                </div>
+              </div>
+
+              {/* Management Boxes */}
+              <div className="grid grid-cols-1 md:grid-cols-3 gap-6 justify-center">
+                <a href="driver management.html" className="bg-[#1e2538] p-6 rounded-xl text-center shadow hover:scale-[1.02] transition block">
+                  <img src="driver management.png" alt="Driver Management" className="w-12 h-12 mx-auto mb-3" />
+                  <h4 className="font-bold mb-2">Driver Management</h4>
+                  <p className="text-sm text-gray-400">Add, Edit or Manage Driver Accounts</p>
+                </a>
+
+                <a href="passenger management.html" className="bg-[#1e2538] p-6 rounded-xl text-center shadow hover:scale-[1.02] transition block">
+                  <img src="passenger management.png" alt="Passenger Management" className="w-12 h-12 mx-auto mb-3" />
+                  <h4 className="font-bold mb-2">Passenger Management</h4>
+                  <p className="text-sm text-gray-400">View and Manage Passenger Accounts</p>
+                </a>
+
+                <a href="booking management.html" className="bg-[#1e2538] p-6 rounded-xl text-center shadow hover:scale-[1.02] transition block">
+                  <img src="booking management.png" alt="Booking Management" className="w-12 h-12 mx-auto mb-3" />
+                  <h4 className="font-bold mb-2">Booking Management</h4>
+                  <p className="text-sm text-gray-400">Monitor and Manage All Bookings</p>
+                </a>
+              </div>
+
+              {/* Driver Profile Modal */}
+              {selectedDriver && (
+                <div className="fixed inset-0 bg-black bg-opacity-60 flex justify-center items-center z-20">
+                  <div className="bg-[#1a1f2e] p-8 rounded-2xl shadow-xl w-full max-w-lg relative">
+                    <button
+                      onClick={() => setSelectedDriver(null)}
+                      className="absolute top-3 right-4 text-gray-400 hover:text-white text-xl"
+                    >
+                      ✕
+                    </button>
+                    <div className="flex flex-col items-center text-center">
+                      <img src={selectedDriver.image} alt="Driver" className="w-24 h-24 rounded-full mb-4 border-4 border-yellow-400" />
+                      <h3 className="text-2xl font-bold">{selectedDriver.name}</h3>
+                      <p className="text-gray-400 mb-2">{selectedDriver.location}</p>
+                      <div className="mt-3 space-y-1 text-gray-300 text-sm">
+                        <p><strong>Tricycle #:</strong> {selectedDriver.tricycle}</p>
+                        <p><strong>License:</strong> {selectedDriver.license}</p>
+                        <p><strong>Contact:</strong> {stripPhonePrefix(selectedDriver.contact)}</p>
+                        <p><strong>Status:</strong> <span className={selectedDriver.status === "Online" ? "text-green-400" : "text-gray-400"}>{selectedDriver.status}</span></p>
+                        <p><strong>Joined:</strong> {selectedDriver.joined}</p>
+                        <p><strong>Total Rides:</strong> {selectedDriver.totalRides}</p>
+                      </div>
+                      <div className="mt-4">
+                        <div className="flex justify-center items-center">
+                          {renderStars(selectedDriver.rating)}
+                          <span className="ml-2 text-yellow-400">{selectedDriver.rating.toFixed(1)}/5</span>
+                        </div>
+                        <p className="text-gray-400 text-sm mt-1">Based on {selectedDriver.reviews.length} reviews</p>
+                        <ul className="mt-3 text-left space-y-2">
+                          {selectedDriver.reviews.map((review, idx) => (
+                            <li key={idx} className="bg-[#2a3244] px-3 py-2 rounded-lg">{review}</li>
+                          ))}
+                        </ul>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              )}
+
+              {/* Passenger Profile Modal */}
+              {selectedPassenger && (
+                <div className="fixed inset-0 bg-black bg-opacity-60 flex justify-center items-center z-20">
+                  <div className="bg-[#1a1f2e] p-8 rounded-2xl shadow-xl w-full max-w-lg relative">
+                    <button
+                      onClick={() => setSelectedPassenger(null)}
+                      className="absolute top-3 right-4 text-gray-400 hover:text-white text-xl"
+                    >
+                      ✕
+                    </button>
+                    <div className="flex flex-col items-center text-center">
+                      <div className="w-24 h-24 rounded-full mb-4 border-4 border-yellow-400 bg-gradient-to-br from-blue-400 to-purple-500 flex items-center justify-center text-white text-4xl font-bold">
+                        {selectedPassenger.name.charAt(0)}
+                      </div>
+                      <h3 className="text-2xl font-bold">{selectedPassenger.name}</h3>
+                      <p className="text-gray-400 mb-2">{selectedPassenger.location}</p>
+                      <div className="mt-3 space-y-1 text-gray-300 text-sm">
+                        <p><strong>Contact:</strong> {stripPhonePrefix(selectedPassenger.contact)}</p>
+                        <p><strong>Joined:</strong> {selectedPassenger.joined}</p>
+                        <p><strong>Total Rides:</strong> {selectedPassenger.totalRides}</p>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              )}
+
+              {/* Booking Details Modal */}
+{selectedBooking && (
+  <div className="fixed inset-0 bg-black bg-opacity-60 flex justify-center items-center z-20">
+    <div className="bg-[#1a1f2e] p-6 rounded-2xl shadow-xl w-full max-w-5xl relative flex flex-col md:flex-row gap-6">
+      <button
+        onClick={() => setSelectedBooking(null)}
+        className="absolute top-3 right-4 text-gray-400 hover:text-white text-xl"
+      >
+        ✕
+      </button>
+
+      {/* Booking Info */}
+      <div className="flex-1 flex flex-col justify-between">
+        <div className="text-center md:text-left mb-4">
+          <h3 className="text-2xl font-bold text-yellow-400">Booking #{selectedBooking.id}</h3>
+          <span className={`inline-block mt-2 px-2 py-1 rounded text-sm font-bold ${statusBadgeClass(selectedBooking.status)}`}>
+            {selectedBooking.status.toUpperCase()}
+          </span>
+        </div>
+
+        <div className="grid grid-cols-1 md:grid-cols-2 gap-4 text-gray-300">
+          <div className="bg-[#2a3244] p-4 rounded-lg">
+            <p className="text-gray-400 text-sm mb-1">PASSENGER</p>
+            <p className="text-lg font-bold">{selectedBooking.passenger}</p>
+          </div>
+          <div className="bg-[#2a3244] p-4 rounded-lg">
+            <p className="text-gray-400 text-sm mb-1">DRIVER</p>
+            <p className="text-lg font-bold">{selectedBooking.driver}</p>
+          </div>
+          <div className="bg-[#2a3244] p-4 rounded-lg">
+            <p className="text-gray-400 text-sm mb-1">PICKUP</p>
+            <p className="text-lg">{selectedBooking.pickup}</p>
+          </div>
+          <div className="bg-[#2a3244] p-4 rounded-lg">
+            <p className="text-gray-400 text-sm mb-1">DROPOFF</p>
+            <p className="text-lg">{selectedBooking.dropoff}</p>
+          </div>
+          <div className="bg-[#2a3244] p-4 rounded-lg">
+            <p className="text-gray-400 text-sm mb-1">FARE</p>
+            <p className="text-xl font-bold text-yellow-400">{selectedBooking.fare}</p>
+          </div>
+          <div className="bg-[#2a3244] p-4 rounded-lg">
+            <p className="text-gray-400 text-sm mb-1">DISTANCE</p>
+            <p className="text-xl font-bold">{selectedBooking.distance}</p>
+          </div>
+          <div className="bg-[#2a3244] p-4 rounded-lg">
+            <p className="text-gray-400 text-sm mb-1">DATE & TIME</p>
+            <p className="text-sm">{selectedBooking.date}</p>
+            <p className="text-sm">{selectedBooking.time}</p>
+              </div>
+            </div>
+            </div>
+            </div>
+          </div>
+          )}
+          </div>
+        </main>
+    </div>
+  );
+};
+
+    ReactDOM.createRoot(document.getElementById("root")).render(<Dashboard />);
+  </script>
+</body>
+</html>
