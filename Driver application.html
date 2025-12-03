@@ -206,7 +206,7 @@
           let name = a.name || `${a.Firstname || ''} ${a.Lastname || ''}`.trim() || 'Applicant';
           let contact = a.contact || a.MobileNumber || '';
           let license = a.license || a.LicenseNumber || '';
-          let plate = a.plate || a.TricycleNumber || '';
+          let plate = a.plate || a.TricyclePlateNumber || a.TricycleNumber || '';
 
           try {
             // If application references a canonical user, prefer that user's data
@@ -216,10 +216,10 @@
               contact = userRecApp.MobileNumber || contact;
             }
             const driverRefId = a.DriverID || a.driverId || a.DriverId || null;
-            if (driverRefId && rawDrivers && rawDrivers[String(driverRefId)]) {
+              if (driverRefId && rawDrivers && rawDrivers[String(driverRefId)]) {
               const drv = rawDrivers[String(driverRefId)];
               license = drv.LicenseNumber || drv.license || license;
-              plate = drv.TricycleNumber || drv.tricycle || plate;
+              plate = drv.TricyclePlateNumber || drv.TricycleNumber || drv.tricycle || plate;
               const userRec = rawUsers && rawUsers[drv.UserID];
               if (userRec) {
                 name = [userRec.Firstname, userRec.Middlename, userRec.Lastname].filter(Boolean).join(' ') || name;
@@ -291,7 +291,7 @@
             const userRec = rawUsers && rawUsers[drv.UserID];
             const name = userRec ? [userRec.Firstname, userRec.Middlename, userRec.Lastname].filter(Boolean).join(' ') : (drv.Name || drv.name || 'Applicant');
             const contact = userRec ? userRec.MobileNumber : (drv.MobileNumber || drv.contact || '');
-            const plate = drv.TricycleNumber || drv.tricycle || '';
+            const plate = drv.TricyclePlateNumber || drv.TricycleNumber || drv.tricycle || '';
             const initials = (name || 'Applicant').split(' ').map(n => n[0]||'').join('').slice(0,2).toUpperCase();
 
             items.push({
