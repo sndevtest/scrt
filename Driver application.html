@@ -547,8 +547,29 @@
             const drvId = selected.id.replace(/^drv-/, '');
             const drvRef = window.dbRef(window.db, `drivers/${drvId}`);
             try {
+              // Determine final application status. If admin set to APPROVED but the
+              // linked user is already active, treat this as ADDED and clear IsApplying.
+              let finalAppStatus = appStatus;
+              const drvRec = rawDrivers && rawDrivers[String(drvId)];
+              const linkedUserId = drvRec && drvRec.UserID;
+              try {
+                const scheck = (appStatus || '').toString().toUpperCase();
+                if (scheck.includes('APPROVED') && linkedUserId) {
+                  try {
+                    const userRefCheck = window.dbRef(window.db, `users/${linkedUserId}`);
+                    const userSnapCheck = await window.dbGet(userRefCheck);
+                    const userObjCheck = userSnapCheck.exists() ? userSnapCheck.val() : {};
+                    if (userObjCheck && userObjCheck.IsActive) {
+                      finalAppStatus = 'ADDED';
+                    }
+                  } catch (e) {
+                    console.warn('Failed to check linked user IsActive for driver update', e);
+                  }
+                }
+              } catch(e) {}
+
               // Update driver ApplicationStatus and any edited fields (license, tricycle, contact, franchiseExpiry)
-              const driverUpdatePayload = { ApplicationStatus: appStatus };
+              const driverUpdatePayload = { ApplicationStatus: finalAppStatus };
               // include formatted license if provided
               if (payload.license) driverUpdatePayload.LicenseNumber = payload.license;
               // Persist plate and tricycle number as SEPARATE fields (always write explicit fields)
@@ -556,11 +577,28 @@
               driverUpdatePayload.TricycleNumber = payload.tricycleNumber || '';
               if (payload.franchiseExpiry) driverUpdatePayload.FranchiseExpiry = payload.franchiseExpiry;
               // Update status label only; driver activation/online state are managed in Driver Management
-              if (appStatus === 'EXPIRED') {
+              // Set Status active only for approved/added application states; otherwise mark inactive.
+              try {
+                const s = (finalAppStatus || '').toString().toUpperCase();
+                if (s.includes('APPROVED') || s.includes('ADDED')) {
+                  driverUpdatePayload.Status = 'Active';
+                } else {
+                  driverUpdatePayload.Status = 'Inactive';
+                }
+              } catch (e) {
                 driverUpdatePayload.Status = 'Inactive';
-              } else {
-                driverUpdatePayload.Status = 'Active';
               }
+
+              // Ensure IsApplying flag follows final status: when ADDED -> false, otherwise preserve existing or true
+              try {
+                if (finalAppStatus === 'ADDED') {
+                  driverUpdatePayload.IsApplying = false;
+                } else if (typeof drvRec !== 'undefined' && typeof drvRec.IsApplying !== 'undefined') {
+                  driverUpdatePayload.IsApplying = drvRec.IsApplying;
+                } else {
+                  driverUpdatePayload.IsApplying = true;
+                }
+              } catch (e) { driverUpdatePayload.IsApplying = true; }
 
               try { console.debug('Updating driver', drvId, 'with payload:', driverUpdatePayload); } catch(e) {}
               await window.dbUpdate(drvRef, driverUpdatePayload);
@@ -678,17 +716,36 @@
             // If this applicant already has a driver record, update it
             if (selected.drvId) {
               const drvKey = selected.drvId;
-              const driverUpdate = { ApplicationStatus: appStatus };
+              // Determine final status for this driver update (see drv- path logic above)
+              let finalApp = appStatus;
+              try {
+                const s2 = (appStatus || '').toString().toUpperCase();
+                if (s2.includes('APPROVED') && userIdVal) {
+                  try {
+                    const userRefCheck2 = window.dbRef(window.db, `users/${userIdVal}`);
+                    const userSnapCheck2 = await window.dbGet(userRefCheck2);
+                    const userObjCheck2 = userSnapCheck2.exists() ? userSnapCheck2.val() : {};
+                    if (userObjCheck2 && userObjCheck2.IsActive) {
+                      finalApp = 'ADDED';
+                    }
+                  } catch (e) { console.warn('Failed to check user IsActive for applicant->driver update', e); }
+                }
+              } catch (e) {}
+
+              const driverUpdate = { ApplicationStatus: finalApp };
               // Do not toggle driver/user activation or online flags here; only update status label
-              if (appStatus === 'EXPIRED') {
+              try {
+                const s2 = (finalApp || '').toString().toUpperCase();
+                driverUpdate.Status = (s2.includes('APPROVED') || s2.includes('ADDED')) ? 'Active' : 'Inactive';
+              } catch (e) {
                 driverUpdate.Status = 'Inactive';
-              } else {
-                driverUpdate.Status = 'Active';
               }
               driverUpdate.TricyclePlateNumber = payload.plate || '';
               driverUpdate.TricycleNumber = payload.tricycleNumber || '';
               if (payload.license) driverUpdate.LicenseNumber = payload.license;
               if (payload.franchiseExpiry) driverUpdate.FranchiseExpiry = payload.franchiseExpiry;
+              // IsApplying flips false if finalApp is ADDED
+              try { driverUpdate.IsApplying = (finalApp === 'ADDED' ? false : true); } catch(e) { driverUpdate.IsApplying = true; }
               await window.dbUpdate(window.dbRef(window.db, `drivers/${drvKey}`), driverUpdate);
 
               // update user contact/name if present
@@ -745,15 +802,32 @@
             if (payload.license || payload.plate || appStatus === 'APPROVED') {
               try {
                 const newDrvId = await claimSmallestNumericId('drivers');
+                // Determine final application status when creating a new driver record.
+                let finalApp = appStatus;
+                try {
+                  const sCheck = (appStatus || '').toString().toUpperCase();
+                  if (sCheck.includes('APPROVED') && userIdVal) {
+                    try {
+                      const userRefCheck3 = window.dbRef(window.db, `users/${userIdVal}`);
+                      const userSnapCheck3 = await window.dbGet(userRefCheck3);
+                      const userObjCheck3 = userSnapCheck3.exists() ? userSnapCheck3.val() : {};
+                      if (userObjCheck3 && userObjCheck3.IsActive) {
+                        finalApp = 'ADDED';
+                      }
+                    } catch (e) { console.warn('Failed to check user IsActive when creating new driver', e); }
+                  }
+                } catch (e) {}
+
+                const sFinal = (finalApp || '').toString().toUpperCase();
                 const drvPayload = {
                   UserID: userIdVal || null,
                   LicenseNumber: payload.license || '',
                   TricyclePlateNumber: payload.plate || '',
                   TricycleNumber: payload.tricycleNumber || payload.plate || '',
                   FranchiseExpiry: payload.franchiseExpiry || '',
-                  // keep IsApplying true unless the driver was explicitly 'ADDED' in Driver Management
-                  IsApplying: appStatus === 'ADDED' ? false : true,
-                  ApplicationStatus: appStatus,
+                  IsApplying: finalApp === 'ADDED' ? false : true,
+                  ApplicationStatus: finalApp,
+                  Status: (sFinal.includes('APPROVED') || sFinal.includes('ADDED')) ? 'Active' : 'Inactive',
                   CreatedAt: new Date().toISOString()
                 };
                 await window.dbSet(window.dbRef(window.db, `drivers/${newDrvId}`), drvPayload);

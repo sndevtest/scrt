@@ -469,14 +469,25 @@
     };
 
     const EditDriverModal = ({ driver, driverIndex, onClose, onSave }) => {
+      const formatDateForInput = (iso) => {
+        if (!iso) return '';
+        try {
+          const d = new Date(iso);
+          const yyyy = d.getUTCFullYear();
+          const mm = String(d.getUTCMonth() + 1).padStart(2, '0');
+          const dd = String(d.getUTCDate()).padStart(2, '0');
+          return `${yyyy}-${mm}-${dd}`;
+        } catch (e) { return ''; }
+      };
+
       const [editedDriver, setEditedDriver] = useState({
         name: driver.name,
         contact: stripPhonePrefix(driver.contact),
-        registeredDate: "2024-01-15",
+        // registration date comes from the users/<id>/CreatedAt
+        registeredDate: formatDateForInput(driver.registeredDate || ''),
         license: driver.license,
         tricycle: driver.tricycle,
-        franchiseExpiry: "2025-01-15",
-        status: driver.status
+        franchiseExpiry: driver.franchiseExpiry || ''
       });
       const [editedLicenseError, setEditedLicenseError] = useState("");
 
@@ -516,7 +527,7 @@
         }
       };
 
-      const handleSave = () => {
+      const handleSave = async () => {
         // Strip any non-digit characters to check actual digit count (should be 11)
         const contactDigits = editedDriver.contact.toString().replace(/\D/g, '');
         if (contactDigits.length !== 11) {
@@ -537,9 +548,67 @@
             return;
           }
         } catch(e) {}
+
         // Re-add +63 prefix to contact before saving
         const contactWithPrefix = '+63' + contactDigits;
-        onSave(driverIndex, { ...editedDriver, contact: contactWithPrefix });
+
+        // Persist edits: update users/<userId> for name/contact; update or create drivers/<id> for license/plate/franchiseExpiry
+        try {
+          const driverToUpdate = driver || {};
+          const driverId = driverToUpdate.driverId || null;
+          const userId = driverToUpdate.userId;
+
+          // Update user record (do NOT change IsActive here)
+          if (userId) {
+            const nameParts = (editedDriver.name || '').trim().split(/\s+/);
+            const firstname = nameParts[0] || '';
+            const lastname = nameParts.length > 1 ? nameParts[nameParts.length - 1] : '';
+            const middlename = nameParts.length > 2 ? nameParts.slice(1, -1).join(' ') : '';
+            const userRef = window.dbRef(window.db, `users/${userId}`);
+            const userSnap = await window.dbGet(userRef);
+            const userObj = userSnap.exists() ? userSnap.val() : {};
+            userObj.Firstname = firstname;
+            userObj.Middlename = middlename;
+            userObj.Lastname = lastname;
+            userObj.MobileNumber = contactWithPrefix;
+            await window.dbSet(userRef, userObj);
+          }
+
+          // Update or create driver record
+          if (driverId) {
+            const driverRef = window.dbRef(window.db, `drivers/${driverId}`);
+            await window.dbUpdate(driverRef, {
+              LicenseNumber: editedDriver.license,
+              TricyclePlateNumber: editedDriver.tricycle,
+              TricycleNumber: editedDriver.tricycle,
+              FranchiseExpiry: editedDriver.franchiseExpiry || ''
+            });
+          } else {
+            // create a new driver record linked to this user
+            const newDrvId = await claimSmallestNumericId('drivers');
+            const driverData = {
+              UserID: driver.userId,
+              LicenseNumber: editedDriver.license,
+              TricyclePlateNumber: editedDriver.tricycle,
+              TricycleNumber: editedDriver.tricycle,
+              FranchiseExpiry: editedDriver.franchiseExpiry || '',
+              Status: 'Active',
+              ApplicationStatus: 'ADDED',
+              CreatedAt: new Date().toISOString()
+            };
+            await window.dbSet(window.dbRef(window.db, `drivers/${newDrvId}`), driverData);
+            // link driver id to user record
+            try { await window.dbUpdate(window.dbRef(window.db, `users/${driver.userId}`), { DriverID: newDrvId }); } catch(e) {}
+          }
+
+          // Local UI update (listeners will refresh actual state)
+          onSave(driverIndex, { ...editedDriver, contact: contactWithPrefix });
+          window.showAlert('Driver information updated successfully!', 'success');
+          onClose();
+        } catch (err) {
+          console.error('Error saving driver edits:', err);
+          window.showAlert('Error saving changes: ' + (err && err.message ? err.message : err), 'error');
+        }
       };
 
       if (!driver) return null;
@@ -607,17 +676,7 @@
                   onChange={(e) => handleChange('franchiseExpiry', e.target.value)}
                 />
               </div>
-              <div>
-                <label className="block text-gray-300 mb-2 font-medium" style={{fontSize: 'clamp(0.8rem, 1.2vw, 1rem)'}}>Status</label>
-                <select 
-                  className="w-full px-3 py-2 sm:px-4 sm:py-3 rounded-lg bg-[#252d42] text-white border border-gray-700 focus:border-yellow-500 focus:outline-none" style={{fontSize: 'clamp(0.82rem, 1.4vw, 1.05rem)'}} 
-                  value={editedDriver.status}
-                  onChange={(e) => handleChange('status', e.target.value)}
-                >
-                  <option value="Active">Active</option>
-                  <option value="Inactive">Inactive</option>
-                </select>
-              </div>
+              {/* Status is managed by Driver Management workflow and not editable here; removed from form */}
             </div>
             <div className="flex flex-col sm:flex-row sm:justify-between gap-3 mt-6">
               <button onClick={onClose} className="bg-red-600 hover:bg-red-700 px-6 py-3 rounded-lg font-semibold text-white w-full sm:w-auto">Cancel</button>
@@ -772,42 +831,58 @@
       }
     })();
 
-      // Derive drivers array from DB objects
+      // Derive drivers array from users: include users where RoleID === 2 and IsActive === true.
+      // Merge driver-specific fields from drivers/ when available. This makes the list canonical
+      // based on users (IsActive lives in users/) while Status is driven by drivers/ records.
       useEffect(() => {
         const makeFullName = (u) => {
           if (!u) return 'Unknown';
           return [u.Firstname, u.Middlename, u.Lastname].filter(Boolean).join(' ');
         };
 
-        const driversArr = Object.entries(rawDrivers || {})
-          // Only include drivers that have been explicitly imported (Status/ApplicationStatus = ADDED or Active)
-          .filter(([key, d]) => {
-            if (!d || !d.UserID) return false;
-            const user = rawUsers && rawUsers[d.UserID];
-            if (!user || user.DeletedAt) return false;
-            // Only include if driver has been marked as ADDED or has IsActive explicitly set to true
-            const isAdded = (d.Status === 'Active' && d.IsActive === true);
-            const appStatus = (d.ApplicationStatus || '').toString().toUpperCase();
-            const isAddedStatus = appStatus.includes('ADDED');
-            return isAdded || isAddedStatus;
+        const usersVal = rawUsers || {};
+        const drvsVal = rawDrivers || {};
+        const driversArr = Object.entries(usersVal)
+          .map(([userId, u]) => {
+            if (!u) return null;
+            // Only include RoleID === 2 (driver) and only if user is active in Driver Management
+            if (String(u.RoleID) !== '2') return null;
+            if (!u.IsActive) return null; // only include users that are marked active (added in Driver Management)
+            if (u.DeletedAt) return null;
+
+            // find matching driver record (if any)
+            let drvKey = null;
+            let drvRec = null;
+            for (const [k, drv] of Object.entries(drvsVal)) {
+              if (!drv) continue;
+              if (String(drv.UserID) === String(userId)) { drvKey = k; drvRec = drv; break; }
+            }
+
+            const name = makeFullName(u);
+            const tricycle = drvRec ? (drvRec.TricyclePlateNumber || drvRec.TricycleNumber || '') : '';
+            const license = drvRec ? (drvRec.LicenseNumber || '') : '';
+            const contact = u ? u.MobileNumber : '';
+            const status = drvRec && (drvRec.Status === 'Active' || (drvRec.ApplicationStatus || '').toString().toUpperCase().includes('ADDED')) ? 'Active' : 'Inactive';
+
+            return {
+              // Use driver record id when available, otherwise fall back to a user-based id
+              id: drvKey || `user-${userId}`,
+              driverId: drvKey || null,
+              userId: userId,
+              name,
+              tricycle,
+              license,
+              contact,
+              status,
+              // IsActive is owned by users/
+              isActiveUser: !!u.IsActive,
+              registeredDate: u.CreatedAt || '' ,
+              franchiseExpiry: drvRec ? (drvRec.FranchiseExpiry || '') : ''
+            };
           })
-          .map(([key, d]) => {
-          const user = rawUsers && rawUsers[d.UserID];
-          const name = makeFullName(user);
-          return {
-            id: key,
-            userId: d.UserID,
-            name,
-            // Prefer TricyclePlateNumber (plate number) for display, fall back to internal TricycleNumber
-            tricycle: d.TricyclePlateNumber || d.TricycleNumber || '',
-            license: d.LicenseNumber || '',
-            contact: user ? user.MobileNumber : '',
-            status: d.Status === 'Active' ? 'Active' : 'Inactive'
-          };
-        });
+          .filter(Boolean);
 
         setDrivers(driversArr);
-        // Expose drivers array to window for validation in modal
         window.drivers = driversArr;
       }, [rawUsers, rawDrivers]);
 
@@ -882,13 +957,13 @@
                     IsActive: true,
                     Status: 'Active'
                   });
-                  
-                  // Update driver status to APPROVED - ADDED and mark as active
+
+                  // Update driver record: mark as ADDED and clear IsApplying
                   const driverRef = window.dbRef(window.db, `drivers/${appId}`);
                   await window.dbUpdate(driverRef, {
-                    IsActive: true,
                     Status: 'Active',
-                    ApplicationStatus: 'APPROVED - ADDED'
+                    ApplicationStatus: 'ADDED',
+                    IsApplying: false
                   });
                 } catch(e) {
                   console.error('Error activating driver:', e);
@@ -933,7 +1008,8 @@
                 TricyclePlateNumber: approvedApp.TricyclePlateNumber || approvedApp.TricycleNumber || approvedApp.tricycle || approvedApp.Tricycle || '',
                 TricycleNumber: approvedApp.TricycleNumber || approvedApp.tricycle || approvedApp.Tricycle || '',
                 Status: 'Active',
-                IsActive: true,
+                ApplicationStatus: 'ADDED',
+                IsApplying: false,
                 CreatedAt: new Date().toISOString()
               };
               await window.dbSet(window.dbRef(window.db, `drivers/${newDriverId}`), driverData);
@@ -1035,7 +1111,7 @@
           const lastname = nameParts.length > 1 ? nameParts[nameParts.length - 1] : '';
           const middlename = nameParts.length > 2 ? nameParts.slice(1, -1).join(' ') : '';
 
-          // Update user record in Firebase
+          // Update user record in Firebase (do NOT toggle IsActive here)
           const userRef = window.dbRef(window.db, `users/${userId}`);
           // Read the existing user object
           const userSnap = await window.dbGet(userRef);
@@ -1045,17 +1121,15 @@
           userObj.Middlename = middlename;
           userObj.Lastname = lastname;
           userObj.MobileNumber = editedDriver.contact;
-          userObj.IsActive = editedDriver.status === 'Active';
           await window.dbSet(userRef, userObj);
 
-          // Update driver record in Firebase
+          // Update driver record in Firebase: do NOT toggle IsActive/Status here for existing drivers
           const driverRef = window.dbRef(window.db, `drivers/${driverId}`);
           await window.dbUpdate(driverRef, {
             LicenseNumber: editedDriver.license,
             TricyclePlateNumber: editedDriver.tricycle,
             TricycleNumber: editedDriver.tricycle,
-            IsActive: editedDriver.status === 'Active',
-            Status: editedDriver.status
+            FranchiseExpiry: editedDriver.franchiseExpiry || ''
           });
 
           // Update local state (will also be updated by realtime listener)
@@ -1065,8 +1139,8 @@
             name: editedDriver.name,
             contact: editedDriver.contact,
             license: editedDriver.license,
-            tricycle: editedDriver.tricycle,
-            status: editedDriver.status
+            tricycle: editedDriver.tricycle
+            // Do not overwrite 'status' here
           };
           setDrivers(updatedDrivers);
           setSelectedDriver(null);
@@ -1096,7 +1170,8 @@
             MobileNumber: newDriver.contact,
             Role: 'Driver',
             CreatedAt: new Date().toISOString(),
-            IsActive: true
+            IsActive: true,
+            Status: 'Active'
           };
 
           const userRef = window.dbRef(window.db, `users/${newUserId}`);
@@ -1113,7 +1188,8 @@
             TricyclePlateNumber: newDriver.tricycle,
             TricycleNumber: newDriver.tricycle,
             Status: 'Active',
-            IsActive: true,
+            ApplicationStatus: 'ADDED',
+            IsApplying: false,
             CreatedAt: new Date().toISOString()
           };
 
@@ -1147,7 +1223,6 @@
           // Soft-delete: mark driver and user as inactive rather than removing records
           const driverRef = window.dbRef(window.db, `drivers/${driverKey}`);
           await window.dbUpdate(driverRef, {
-            IsActive: false,
             Status: 'Inactive',
             DeletedAt: new Date().toISOString()
           });
@@ -1296,10 +1371,12 @@
                         </p>
                       </div>
                     </div>
-                    <div className="flex flex-wrap gap-2 sm:gap-3 flex-shrink-0 mt-2 sm:mt-0 ml-0 sm:ml-4">
-                      <span className={`px-3 h-8 flex items-center rounded-lg text-xs sm:text-sm font-bold ${driver.status === 'Active' ? 'bg-green-500 text-white' : 'bg-gray-500 text-white'}`}>{driver.status === 'Active' ? 'ONLINE' : 'OFFLINE'}</span>
-                      <span className={`px-3 h-8 flex items-center rounded-lg text-xs sm:text-sm font-bold ${driver.status === 'Active' ? 'bg-green-500 text-white' : 'bg-gray-500 text-white'}`}>{driver.status === 'Active' ? 'ACTIVE' : 'INACTIVE'}</span>
-                      <button onClick={() => handleEditDriver(index)} className="bg-yellow-500 hover:bg-yellow-600 px-3 sm:px-4 h-8 rounded-lg text-xs sm:text-sm font-semibold text-gray-900 flex items-center gap-2">
+                            <div className="flex flex-wrap gap-2 sm:gap-3 flex-shrink-0 mt-2 sm:mt-0 ml-0 sm:ml-4">
+                              <div className="flex items-center gap-2">
+                                <span className={`px-3 h-8 flex items-center rounded-lg text-xs sm:text-sm font-bold ${driver.isActiveUser ? 'bg-blue-500 text-white' : 'bg-gray-500 text-white'}`}>{driver.isActiveUser ? 'IS ACTIVE' : 'NOT ACTIVE'}</span>
+                                <span className={`px-3 h-8 flex items-center rounded-lg text-xs sm:text-sm font-bold ${driver.status === 'Active' ? 'bg-green-500 text-white' : 'bg-gray-500 text-white'}`}>{driver.status === 'Active' ? 'ACTIVE' : 'INACTIVE'}</span>
+                              </div>
+                              <button onClick={() => handleEditDriver(index)} className="bg-yellow-500 hover:bg-yellow-600 px-3 sm:px-4 h-8 rounded-lg text-xs sm:text-sm font-semibold text-gray-900 flex items-center gap-2">
                         <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                           <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M11 5H6a2 2 0 00-2 2v11a2 2 0 002 2h11a2 2 0 002-2v-5m-1.414-9.414a2 2 0 112.828 2.828L11.828 15H9v-2.828l8.586-8.586z" />
                         </svg>
@@ -1311,7 +1388,7 @@
                         </svg>
                         Delete
                       </button>
-                    </div>
+                            </div>
                   </li>
                 ))}
               </ul>
