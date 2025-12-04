@@ -73,7 +73,7 @@
       border-radius: 10px;
     }
     
-    ::-webkit-scrollbar-thumb {
+    ::webkit-scrollbar-thumbrollbar-thumb {
       background: linear-gradient(180deg, #fbbf24 0%, #f59e0b 100%);
       border-radius: 10px;
     }
@@ -157,40 +157,35 @@
           return [u.Firstname, u.Middlename, u.Lastname].filter(Boolean).join(' ');
         };
 
-        // Build passengers from users node - filter by PassengerID and RoleID
+        // Build passengers from users node - filter by RoleID = 3 (Passenger)
         const passengersArr = [];
         Object.entries(rawUsers || {}).forEach(([userId, userObj]) => {
           try {
-            // Include users where PassengerID exists AND RoleID indicates passenger role
-            // Check for PassengerID field and RoleID matching passenger (case-insensitive)
-            const hasPassengerId = userObj.PassengerID && String(userObj.PassengerID).trim() !== '';
-            const isPassengerRole = userObj.RoleID && (String(userObj.RoleID).toLowerCase() === 'passenger' || String(userObj.RoleID) === '2');
-            
-            // Also support legacy Role field for backward compatibility
-            const isLegacyPassenger = !isPassengerRole && String(userObj.Role || '').toLowerCase() === 'passenger';
-            
-            if (!userObj || (!hasPassengerId && !isPassengerRole && !isLegacyPassenger)) return;
+            // Filter: RoleID must be 3 (Passenger) - strict check
+            const roleId = userObj.RoleID ? String(userObj.RoleID).trim() : '';
+            if (roleId !== '3') return;
+
+            // Ensure PassengerID exists
+            const passengerID = userObj.PassengerID ? String(userObj.PassengerID).trim() : '';
+            if (!passengerID) return;
 
             const name = makeFullName(userObj);
             const initials = name.split(" ").map(n => n[0]).join("").slice(0, 2).toUpperCase();
             
             // Count total rides for this passenger using PassengerID
-            const passengerIdForMatch = userObj.PassengerID || userId;
             const totalRides = Object.values(rawBookings || {}).filter(b => 
-              String(b.PassengerID) === String(passengerIdForMatch) || 
-              String(b.PassengerID) === String(userId) || 
-              String(b.PassengerID) === `P${userId}`
+              String(b.PassengerID) === passengerID
             ).length;
             
             passengersArr.push({
-              id: userObj.PassengerID || userId,
+              id: passengerID,
               userId,
               initials,
               name,
-              phone: userObj ? userObj.MobileNumber : '',
-              email: userObj ? userObj.Email : '',
+              phone: userObj.MobileNumber || '',
+              email: userObj.Email || '',
               rides: totalRides,
-              status: userObj && userObj.IsActive ? 'ACTIVE' : 'INACTIVE'
+              status: userObj.IsActive ? 'ACTIVE' : 'INACTIVE'
             });
           } catch (e) {
             // ignore parsing errors for malformed user objects
