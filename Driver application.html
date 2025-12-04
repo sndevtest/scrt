@@ -18,7 +18,9 @@
 
   <script type="module">
     import { initializeApp } from "https://www.gstatic.com/firebasejs/12.6.0/firebase-app.js";
+    import { getAuth, signInAnonymously, onAuthStateChanged } from "https://www.gstatic.com/firebasejs/12.6.0/firebase-auth.js";
     import { getDatabase, ref, onValue, get, set, update, push, runTransaction } from "https://www.gstatic.com/firebasejs/12.6.0/firebase-database.js";
+    import { getStorage, ref as storageRef, uploadBytes, getBytes, list, listAll } from "https://www.gstatic.com/firebasejs/12.6.0/firebase-storage.js";
 
     const firebaseConfig = {
       apiKey: "AIzaSyBS-g5bFBaJ6a35hWmjvoN-s8FuMEuxtew",
@@ -32,7 +34,24 @@
     };
 
     const app = initializeApp(firebaseConfig);
+    const auth = getAuth(app);
     const db = getDatabase(app);
+    const storage = getStorage(app);
+
+    // Sign in anonymously for Storage/Database operations
+    signInAnonymously(auth).catch(err => {
+      console.error('Anonymous sign-in failed:', err);
+    });
+
+    // Monitor auth state
+    onAuthStateChanged(auth, (user) => {
+      if (user) {
+        console.log('✅ Authenticated as:', user.uid);
+        window.currentUser = user;
+      } else {
+        console.warn('⚠️ Not authenticated');
+      }
+    });
 
     window.db = db;
     window.dbRef = ref;
@@ -42,6 +61,14 @@
     window.dbUpdate = update;
     window.dbPush = push;
     window.dbRunTransaction = runTransaction;
+    
+    // Storage helpers
+    window.storage = storage;
+    window.storageRef = storageRef;
+    window.uploadBytes = uploadBytes;
+    window.getBytes = getBytes;
+    window.storageList = list;
+    window.storageListAll = listAll;
   </script>
 
   <script src="ui-modals.js"></script>
@@ -155,8 +182,11 @@
 
       // Helper function for status colors (must be before useEffect that uses it)
       const getStatusColor = (status) => {
+          const statusStr = (status || '').toString().toUpperCase();
+          // If ApplicationStatus contains 'ADDED', display as ADDED (green)
+          if (statusStr.includes('ADDED')) return "bg-blue-600";
           // Extract base status (first word before space or hyphen)
-          const baseStatus = (status || '').toString().split(/[\s\-]/)[0].toUpperCase();
+          const baseStatus = statusStr.split(/[\s\-]/)[0];
           switch(baseStatus) {
             case "TO": return "bg-yellow-500"; // "TO REVIEW"
             case "APPROVED": return "bg-green-500";
@@ -164,6 +194,17 @@
             case "REJECTED": return "bg-red-500";
             default: return "bg-gray-500";
           }
+      };
+
+      // Helper to format status for display
+      const formatStatusForDisplay = (appStatus) => {
+        const statusStr = (appStatus || '').toString().toUpperCase();
+        // If contains 'ADDED', display as just 'ADDED'
+        if (statusStr.includes('ADDED')) return 'ADDED';
+        // Otherwise show the full status
+        const words = statusStr.split(/[\s\-]/).filter(Boolean);
+        if (words[0] === 'TO') return 'TO REVIEW';
+        return words[0] || 'TO REVIEW';
       };
 
       // Listen to drivers and users nodes so we can display canonical data for applicants when available
@@ -209,8 +250,7 @@
 
           const statusRaw = (appStatus || 'TO REVIEW').toString();
           const statusWords = statusRaw.toUpperCase().split(/[\s\-]/).filter(Boolean);
-          let status = statusWords[0] === 'TO' ? 'TO REVIEW' : statusWords[0] || 'TO REVIEW';
-          // Do not map 'APPROVED' to 'ADDED' here — display-only 'ADDED' is managed in Driver Management
+          let status = formatStatusForDisplay(appStatus);
 
           const initials = (name || 'Applicant').split(' ').map(n => n[0]||'').join('').slice(0,2).toUpperCase();
 
@@ -241,7 +281,7 @@
           const plate = drv.TricyclePlateNumber || drv.TricycleNumber || '';
           const statusRaw = (drv.ApplicationStatus || drv.Status || 'TO REVIEW').toString();
           const statusWords = statusRaw.toUpperCase().split(/[\s\-]/).filter(Boolean);
-          const status = statusWords[0] === 'TO' ? 'TO REVIEW' : statusWords[0] || 'TO REVIEW';
+          const status = formatStatusForDisplay(drv.ApplicationStatus || drv.Status || 'TO REVIEW');
           const initials = (name || 'Applicant').split(' ').map(n => n[0]||'').join('').slice(0,2).toUpperCase();
           items.push({
             id: `drv-${drvId}`,
@@ -396,6 +436,22 @@
         try {
           base.displayStatus = base.ApplicationStatus || 'TO REVIEW';
         } catch (e) { base.displayStatus = base.ApplicationStatus || 'TO REVIEW'; }
+
+        // Load documents from Realtime Database if driver has documents node
+        try {
+          if (base.drvId && rawDrivers && rawDrivers[String(base.drvId)]) {
+            const drv = rawDrivers[String(base.drvId)];
+            if (drv.documents) {
+              base.documents = drv.documents;
+            } else {
+              base.documents = {};
+            }
+          } else {
+            base.documents = {};
+          }
+        } catch (e) {
+          base.documents = {};
+        }
 
         // Strip +63 prefix from contact for display (will be re-added on save)
         if (base.contact) {
@@ -703,6 +759,29 @@
                 await window.dbSet(window.dbRef(window.db, `drivers/${newDrvId}`), drvPayload);
                 if (userIdVal) await window.dbUpdate(window.dbRef(window.db, `users/${userIdVal}`), { DriverID: newDrvId, RoleID: 2 });
                 try { const driversSnap = await window.dbGet(window.dbRef(window.db, 'drivers')); setRawDrivers(driversSnap.val() || {}); } catch(e) {}
+                
+                // Automatically create Firebase Storage folder for this driver
+                // Folder name format: firstname_lastname_driverId (e.g., "JOHN_DOE_1")
+                try {
+                  if (window.storage && window.storageRef && window.uploadBytes) {
+                    const nameParts = (name || '').trim().split(/\s+/).filter(Boolean);
+                    const firstname = nameParts[0] || '';
+                    const lastname = nameParts.length > 1 ? nameParts[nameParts.length-1] : '';
+                    const folderName = `${firstname}_${lastname}_${newDrvId}`.replace(/\s+/g, '_').toUpperCase();
+                    const folderPath = `drivers/${folderName}/.folder`;
+                    const markerRef = window.storageRef(window.storage, folderPath);
+                    const markerContent = `Driver: ${name}\nDriver ID: ${newDrvId}\nFolder: ${folderName}\nCreated: ${new Date().toISOString()}`;
+                    const markerBlob = new Blob([markerContent], { type: 'text/plain' });
+                    const uploadResult = await window.uploadBytes(markerRef, markerBlob);
+                    console.log(`✅ Storage folder created: ${folderName}`, uploadResult);
+                  } else {
+                    console.warn('Storage helpers not available:', { storage: !!window.storage, storageRef: !!window.storageRef, uploadBytes: !!window.uploadBytes });
+                  }
+                } catch (storageErr) {
+                  console.error('❌ Storage Error:', storageErr);
+                  console.warn('Warning: Could not create storage folder (non-critical)', storageErr);
+                }
+                
                 window.showAlert('Applicant updated and driver record created', 'success');
                 closeModal();
                 return;
@@ -1121,7 +1200,7 @@
                     <thead>
                       <tr className="bg-[#252d42]">
                         <th className="px-6 py-4 text-left text-white font-semibold">Requirement</th>
-                        <th className="px-6 py-4 text-left text-white font-semibold">Copy</th>
+                        <th className="px-6 py-4 text-left text-white font-semibold">Status</th>
                         <th className="px-6 py-4 text-left text-white font-semibold">Date Submitted</th>
                         <th className="px-6 py-4 text-left text-white font-semibold">File</th>
                       </tr>
@@ -1129,43 +1208,31 @@
                     <tbody>
                       <FileRow
                         requirement="Driver's License"
-                        copy={selected.files.license?.copy}
-                        date={selected.files.license?.date}
-                        fileName="driver_s_license.jpeg"
-                        fileSize={selected.files.license?.size}
-                        fileUrl={selected.files.license?.url}
-                        expired={selected.files.license?.expired}
-                        missing={!selected.files.license}
+                        documentType="license"
+                        driverId={selected.drvId}
+                        doc={selected.documents?.license}
+                        missing={!selected.documents?.license}
                       />
                       <FileRow
                         requirement="NBI Clearance"
-                        copy={selected.files.nbi?.copy}
-                        date={selected.files.nbi?.date}
-                        fileName="nbi_clearance.jpeg"
-                        fileSize={selected.files.nbi?.size}
-                        fileUrl={selected.files.nbi?.url}
-                        expired={selected.files.nbi?.expired}
-                        missing={!selected.files.nbi}
+                        documentType="nbi"
+                        driverId={selected.drvId}
+                        doc={selected.documents?.nbi}
+                        missing={!selected.documents?.nbi}
                       />
                       <FileRow
                         requirement="QC ID"
-                        copy={selected.files.qc?.copy}
-                        date={selected.files.qc?.date}
-                        fileName="qc_id.jpeg"
-                        fileSize={selected.files.qc?.size}
-                        fileUrl={selected.files.qc?.url}
-                        expired={selected.files.qc?.expired}
-                        missing={!selected.files.qc}
+                        documentType="qc"
+                        driverId={selected.drvId}
+                        doc={selected.documents?.qc}
+                        missing={!selected.documents?.qc}
                       />
                       <FileRow
                         requirement="Drug Test Result"
-                        copy={selected.files.drug?.copy}
-                        date={selected.files.drug?.date}
-                        fileName="drug_test_result.jpeg"
-                        fileSize={selected.files.drug?.size}
-                        fileUrl={selected.files.drug?.url}
-                        expired={selected.files.drug?.expired}
-                        missing={!selected.files.drug}
+                        documentType="drug"
+                        driverId={selected.drvId}
+                        doc={selected.documents?.drug}
+                        missing={!selected.documents?.drug}
                       />
                     </tbody>
                   </table>
@@ -1194,7 +1261,6 @@
       <div className="flex flex-col">
         <label className="text-sm text-gray-300 mb-2 font-medium">{label}</label>
         <input
-          key={`${name}-${value}`}
           name={name}
           value={value || ''}
           onChange={onChange}
@@ -1343,7 +1409,28 @@
           };
           await window.dbSet(driverRef, driverObj);
 
-          window.showAlert('Driver applicant added and marked as TO REVIEW', 'success');
+          // Automatically create Firebase Storage folder structure for this driver
+          // Folder name format: firstname_lastname_driverId (e.g., "JOHN_DOE_1")
+          try {
+            if (window.storage && window.storageRef && window.uploadBytes) {
+              // Create folder name: firstname_lastname_driverId
+              const folderName = `${firstname}_${lastname}_${driverId}`.replace(/\s+/g, '_').toUpperCase();
+              const folderPath = `drivers/${folderName}/.folder`;
+              const markerRef = window.storageRef(window.storage, folderPath);
+              const markerContent = `Driver: ${name}\nDriver ID: ${driverId}\nFolder: ${folderName}\nCreated: ${new Date().toISOString()}`;
+              const markerBlob = new Blob([markerContent], { type: 'text/plain' });
+              const uploadResult = await window.uploadBytes(markerRef, markerBlob);
+              console.log(`✅ Storage folder created: ${folderName}`, uploadResult);
+            } else {
+              console.warn('Storage helpers not available:', { storage: !!window.storage, storageRef: !!window.storageRef, uploadBytes: !!window.uploadBytes });
+            }
+          } catch (storageErr) {
+            console.error('❌ Storage Error:', storageErr);
+            console.warn('Warning: Could not create storage folder (non-critical)', storageErr);
+            // Don't fail the entire operation if storage folder creation fails
+          }
+
+          window.showAlert('Driver applicant added and marked as TO REVIEW. Storage folder created.', 'success');
           onClose();
         } catch (err) {
           console.error('Error adding driver applicant', err);
@@ -1420,42 +1507,51 @@
       );
     };
 
-    const FileRow = ({ requirement, copy, date, fileName, fileSize, fileUrl, expired, missing }) => {
-      if (missing) {
+    const FileRow = ({ requirement, documentType, driverId, doc, missing }) => {
+      // documentType: 'license', 'nbi', 'qc', 'drug'
+      // doc: { documentType, uploadedAt, fileName, storagePath, downloadUrl, size }
+      
+      if (missing || !doc) {
         return (
           <tr className="bg-[#151b28] hover:bg-[#1a202e]">
             <td className="px-6 py-4 text-gray-300 font-medium">{requirement}</td>
             <td className="px-6 py-4 text-center" colSpan="3">
               <div className="flex items-center justify-center gap-2">
-                <span className="bg-red-600 px-4 py-2 rounded-lg text-sm font-bold text-white">MISSING DOCUMENT</span>
+                <span className="bg-red-600 px-4 py-2 rounded-lg text-sm font-bold text-white">NOT SUBMITTED</span>
               </div>
             </td>
           </tr>
         );
       }
 
+      const uploadDate = doc.uploadedAt ? new Date(doc.uploadedAt).toLocaleDateString() : 'N/A';
+      const fileSize = doc.size ? (doc.size / 1024 / 1024).toFixed(2) + ' MB' : 'Unknown';
+
       return (
         <tr className="bg-[#151b28] hover:bg-[#1a202e]">
           <td className="px-6 py-4 text-gray-300 font-medium">{requirement}</td>
-          <td className="px-6 py-4 text-gray-400">{copy}</td>
-          <td className="px-6 py-4 text-gray-400">
-            {date}
-            {expired && <span className="ml-2 bg-red-600 px-2 py-1 rounded text-xs font-bold text-white">EXPIRED</span>}
-          </td>
+          <td className="px-6 py-4 text-gray-400">-</td>
+          <td className="px-6 py-4 text-gray-400">{uploadDate}</td>
           <td className="px-6 py-4">
-            <a
-              href={fileUrl}
-              target="_blank"
-              className="flex items-center gap-3 text-yellow-500 hover:text-yellow-400"
-            >
-              <svg className="w-6 h-6" fill="currentColor" viewBox="0 0 20 20">
-                <path d="M4 4a2 2 0 012-2h4.586A2 2 0 0112 2.586L15.414 6A2 2 0 0116 7.414V16a2 2 0 01-2 2H6a2 2 0 01-2-2V4z"/>
-              </svg>
-              <div>
-                <div className="font-medium">{fileName}</div>
-                <div className="text-xs text-gray-500">{fileSize}</div>
-              </div>
-            </a>
+            {doc.downloadUrl ? (
+              <a
+                href={doc.downloadUrl}
+                target="_blank"
+                rel="noopener noreferrer"
+                className="flex items-center gap-3 text-yellow-500 hover:text-yellow-400 transition-colors"
+                title={`Download ${doc.fileName}`}
+              >
+                <svg className="w-6 h-6" fill="currentColor" viewBox="0 0 20 20">
+                  <path d="M4 4a2 2 0 012-2h4.586A2 2 0 0112 2.586L15.414 6A2 2 0 0116 7.414V16a2 2 0 01-2 2H6a2 2 0 01-2-2V4z"/>
+                </svg>
+                <div>
+                  <div className="font-medium text-sm">{doc.fileName || `${requirement}.jpg`}</div>
+                  <div className="text-xs text-gray-400">{fileSize}</div>
+                </div>
+              </a>
+            ) : (
+              <span className="text-gray-400 text-sm">URL unavailable</span>
+            )}
           </td>
         </tr>
       );

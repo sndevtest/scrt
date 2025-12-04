@@ -8,7 +8,7 @@
 
   <script type="module">
     import { initializeApp } from "https://www.gstatic.com/firebasejs/12.6.0/firebase-app.js";
-    import { getAuth } from "https://www.gstatic.com/firebasejs/12.6.0/firebase-auth.js";
+    import { getAuth, signInAnonymously, onAuthStateChanged } from "https://www.gstatic.com/firebasejs/12.6.0/firebase-auth.js";
     import {
       getDatabase,
       ref,
@@ -20,6 +20,11 @@
       update,
       runTransaction
     } from "https://www.gstatic.com/firebasejs/12.6.0/firebase-database.js";
+    import {
+      getStorage,
+      ref as storageRef,
+      uploadBytes
+    } from "https://www.gstatic.com/firebasejs/12.6.0/firebase-storage.js";
 
     const firebaseConfig = {
       apiKey: "AIzaSyBS-g5bFBaJ6a35hWmjvoN-s8FuMEuxtew",
@@ -32,10 +37,25 @@
       measurementId: "G-2VWQ0C8EZE"
     };
 
-    // Initialize Firebase
     const app = initializeApp(firebaseConfig);
     const auth = getAuth(app);
     const db = getDatabase(app);
+    const storage = getStorage(app);
+
+    // Sign in anonymously for Storage/Database operations
+    signInAnonymously(auth).catch(err => {
+      console.error('Anonymous sign-in failed:', err);
+    });
+
+    // Monitor auth state
+    onAuthStateChanged(auth, (user) => {
+      if (user) {
+        console.log('✅ Authenticated as:', user.uid);
+        window.currentUser = user;
+      } else {
+        console.warn('⚠️ Not authenticated');
+      }
+    });
 
     // Expose DB helpers to the non-module React script
     window.db = db;
@@ -47,6 +67,11 @@
     window.dbRemove = remove;
     window.dbUpdate = update;
     window.dbRunTransaction = runTransaction;
+
+    // Expose Storage helpers
+    window.storage = storage;
+    window.storageRef = storageRef;
+    window.uploadBytes = uploadBytes;
   </script>
 
   <script src="ui-modals.js"></script>
@@ -638,49 +663,111 @@
         };
       }, []);
 
-    // Derived list: approved applications that are not yet present in drivers
+    // Derived list: approved drivers that are not yet imported into the drivers list
+    // This looks for drivers with APPROVED status that don't have corresponding entries in the active drivers array
     const approvedApplications = (() => {
       try {
+        // Start by checking the drivers/ node for newly approved drivers
+        const drvs = rawDrivers || {};
+        const allDriversFromDb = Object.entries(drvs).map(([id, d]) => {
+          if (!d || !d.UserID) return null;
+          
+          const user = rawUsers && rawUsers[d.UserID];
+          // Include even if user is not active yet (they might be pending activation)
+          if (!user || user.DeletedAt) return null;
+          
+          const name = user ? [user.Firstname, user.Middlename, user.Lastname].filter(Boolean).join(' ') : 'Unnamed';
+          const phone = user ? user.MobileNumber : '';
+          const status = (d.ApplicationStatus || d.Status || '').toString().toUpperCase().trim();
+          
+          return {
+            id,
+            UserID: d.UserID,
+            LicenseNumber: d.LicenseNumber || '',
+            TricycleNumber: d.TricycleNumber || d.TricyclePlateNumber || '',
+            TricyclePlateNumber: d.TricyclePlateNumber || d.TricycleNumber || '',
+            ApplicationStatus: status,
+            Name: name,
+            MobileNumber: phone,
+            Firstname: user ? user.Firstname : '',
+            Middlename: user ? user.Middlename : '',
+            Lastname: user ? user.Lastname : '',
+            _source: 'drivers',
+            _status: status
+          };
+        }).filter(Boolean);
+        
+        // Also check applications/ node for backwards compatibility
         const apps = rawApplications || {};
         const appsArr = Object.entries(apps).map(([id, a]) => {
-          // Enrich with user data from users/ if available
+          // Only include applications that don't have a DriverID yet (not yet imported)
+          if (a.DriverID) return null;
+          
           const userId = a.UserID;
           const user = userId && rawUsers && rawUsers[userId];
+          // Include even if user is not active yet
+          if (!user || user.DeletedAt) return null;
+          
           const name = user ? [user.Firstname, user.Middlename, user.Lastname].filter(Boolean).join(' ') : (a.Name || a.ApplicantName || 'Unnamed');
           const phone = user ? user.MobileNumber : (a.MobileNumber || a.Contact || a.Mobile || '');
+          const status = (a.ApplicationStatus || a.Status || '').toString().toUpperCase().trim();
+          
           return {
             id,
             ...a,
-            // Add resolved user data for display
             Name: name,
             Firstname: user ? user.Firstname : a.Firstname,
             Middlename: user ? user.Middlename : a.Middlename,
             Lastname: user ? user.Lastname : a.Lastname,
             MobileNumber: phone,
-            UserID: userId
+            UserID: userId,
+            _source: 'applications',
+            _status: status
           };
+        }).filter(Boolean);
+        
+        // Debug logging
+        try {
+          console.debug('approvedApplications debug:', {
+            allDriversFromDb: allDriversFromDb.map(d => ({ id: d.id, status: d._status, name: d.Name })),
+            appsArr: appsArr.map(a => ({ id: a.id, status: a._status, name: a.Name })),
+            drivers: drivers.map(d => ({ id: d.id, name: d.name }))
+          });
+        } catch(e) {}
+        
+        // Combine both sources and filter for approved status
+        const allApproved = [...allDriversFromDb, ...appsArr].filter(a => {
+          const status = a._status || '';
+          const isApproved = status.includes('APPROVED');
+          return isApproved;
         });
-        const approved = appsArr.filter(a => (a.ApplicationStatus || '').toString().toLowerCase() === 'approved');
-        const filtered = approved.filter(a => {
-          // Filter out applications where user has been deleted
-          const userId = a.UserID;
-          if (userId && !rawUsers[userId]) {
-            return false; // user deleted, skip this application
-          }
-          
-          const appLicense = normalizeLicenseForCompare(a.LicenseNumber || a.license || a.License || '');
-          if (appLicense) {
-            const existsByLicense = drivers.some(d => normalizeLicenseForCompare(d.license) === appLicense);
-            if (existsByLicense) return false;
-          }
-          if (a.UserID) {
-            const existsByUser = drivers.some(d => d.userId === a.UserID);
-            if (existsByUser) return false;
-          }
-          return true;
+        
+        // Filter out those that are already in the active drivers list
+        const filtered = allApproved.filter(a => {
+          // Don't include if already in drivers list
+          const alreadyExists = drivers.some(d => {
+            // Match by license
+            if (a.LicenseNumber) {
+              const match = normalizeLicenseForCompare(d.license) === normalizeLicenseForCompare(a.LicenseNumber);
+              if (match) return true;
+            }
+            // Match by UserID
+            if (a.UserID) {
+              const match = d.userId === a.UserID;
+              if (match) return true;
+            }
+            return false;
+          });
+          return !alreadyExists;
         });
+        
+        try {
+          console.debug('Final approved applications:', filtered.map(f => ({ id: f.id, name: f.Name, source: f._source })));
+        } catch(e) {}
+        
         return filtered;
       } catch (e) {
+        console.error('Error deriving approved applications:', e);
         return [];
       }
     })();
@@ -693,8 +780,17 @@
         };
 
         const driversArr = Object.entries(rawDrivers || {})
-          // Include ALL drivers (including soft-deleted/inactive) so filtering logic works correctly
-          .filter(([key, d]) => d && d.UserID && rawUsers && rawUsers[d.UserID] && rawUsers[d.UserID].IsActive !== false && !rawUsers[d.UserID].DeletedAt)
+          // Only include drivers that have been explicitly imported (Status/ApplicationStatus = ADDED or Active)
+          .filter(([key, d]) => {
+            if (!d || !d.UserID) return false;
+            const user = rawUsers && rawUsers[d.UserID];
+            if (!user || user.DeletedAt) return false;
+            // Only include if driver has been marked as ADDED or has IsActive explicitly set to true
+            const isAdded = (d.Status === 'Active' && d.IsActive === true);
+            const appStatus = (d.ApplicationStatus || '').toString().toUpperCase();
+            const isAddedStatus = appStatus.includes('ADDED');
+            return isAdded || isAddedStatus;
+          })
           .map(([key, d]) => {
           const user = rawUsers && rawUsers[d.UserID];
           const name = makeFullName(user);
@@ -760,21 +856,48 @@
             if (importing[appId]) return;
             setImporting(prev => ({ ...prev, [appId]: true }));
             try {
-              const app = rawApplications && rawApplications[appId];
-              if (!app) {
-                window.showAlert('Application not found', 'error');
+              // Find the application/driver from the approved list
+              const approvedApp = approvedApplications.find(a => a.id === appId);
+              if (!approvedApp) {
+                window.showAlert('Application/Driver not found', 'error');
                 return;
               }
 
-              const name = app.Name || ([app.Firstname, app.Middlename, app.Lastname].filter(Boolean).join(' ')) || app.ApplicantName || '';
-              const phone = (app.MobileNumber || app.Mobile || app.Contact || '').toString().replace(/\D/g, '').slice(0, 11);
-              const licenseRaw = app.LicenseNumber || app.license || app.License || '';
+              const name = approvedApp.Name || ([approvedApp.Firstname, approvedApp.Middlename, approvedApp.Lastname].filter(Boolean).join(' ')) || 'Unnamed';
+              const phone = (approvedApp.MobileNumber || approvedApp.Mobile || approvedApp.Contact || '').toString().replace(/\D/g, '').slice(0, 11);
+              const licenseRaw = approvedApp.LicenseNumber || approvedApp.license || approvedApp.License || '';
               const license = formatLicense(licenseRaw);
               if (!isValidLicense(license)) {
                 window.showAlert('Application has invalid license format: ' + (licenseRaw || ''), 'error');
                 return;
               }
 
+              // If this came from drivers/ node, it already has a driver record - just mark it as ADDED
+              if (approvedApp._source === 'drivers') {
+                const userId = approvedApp.UserID;
+                // Mark as ADDED and ensure active
+                try {
+                  const userRef = window.dbRef(window.db, `users/${userId}`);
+                  await window.dbUpdate(userRef, {
+                    IsActive: true,
+                    Status: 'Active'
+                  });
+                  
+                  // Update driver status to APPROVED - ADDED and mark as active
+                  const driverRef = window.dbRef(window.db, `drivers/${appId}`);
+                  await window.dbUpdate(driverRef, {
+                    IsActive: true,
+                    Status: 'Active',
+                    ApplicationStatus: 'APPROVED - ADDED'
+                  });
+                } catch(e) {
+                  console.error('Error activating driver:', e);
+                }
+                window.showAlert(`${name} has been imported and added to Driver Management!`, 'success');
+                return;
+              }
+
+              // Otherwise, create a new driver record from the application
               const norm = normalizeLicenseForCompare(license);
               const existsLicense = Object.values(rawDrivers || {}).some(d => normalizeLicenseForCompare(d.LicenseNumber || d.license || '') === norm);
               if (existsLicense) {
@@ -783,7 +906,7 @@
               }
 
               // Determine user id: reuse if provided and exists, otherwise create new user
-              let userId = app.UserID;
+              let userId = approvedApp.UserID;
               if (!userId || !rawUsers[userId]) {
                 userId = await claimSmallestNumericId('users');
                 const nameParts = (name || '').trim().split(/\s+/);
@@ -803,23 +926,46 @@
                 await window.dbSet(window.dbRef(window.db, `users/${userId}`), userData);
               }
 
-              // Claim driver id and create driver record
               const newDriverId = await claimSmallestNumericId('drivers');
               const driverData = {
                 UserID: userId,
                 LicenseNumber: license,
-                TricyclePlateNumber: app.TricyclePlateNumber || app.TricycleNumber || app.tricycle || app.Tricycle || '',
-                TricycleNumber: app.TricycleNumber || app.tricycle || app.Tricycle || '',
+                TricyclePlateNumber: approvedApp.TricyclePlateNumber || approvedApp.TricycleNumber || approvedApp.tricycle || approvedApp.Tricycle || '',
+                TricycleNumber: approvedApp.TricycleNumber || approvedApp.tricycle || approvedApp.Tricycle || '',
                 Status: 'Active',
                 IsActive: true,
                 CreatedAt: new Date().toISOString()
               };
               await window.dbSet(window.dbRef(window.db, `drivers/${newDriverId}`), driverData);
 
-              // Update application to link driver
+              // Automatically create Firebase Storage folder for this driver
+              try {
+                if (window.storage && window.storageRef && window.uploadBytes) {
+                  // Derive folder name from applicant name + ID
+                  const rawName = approvedApp.Name || [approvedApp.Firstname, approvedApp.Middlename, approvedApp.Lastname].filter(Boolean).join(' ');
+                  const nameParts = (rawName || '').toString().trim().split(/\s+/).filter(Boolean);
+                  const first = nameParts[0] || '';
+                  const last = nameParts.length > 1 ? nameParts[nameParts.length - 1] : '';
+                  const folderName = `${first}_${last}_${newDriverId}`.replace(/\s+/g, '_').toUpperCase();
+                  const folderPath = `drivers/${folderName}/.folder`;
+                  const markerRef = window.storageRef(window.storage, folderPath);
+                  const markerContent = `Driver: ${rawName}\nDriver ID: ${newDriverId}\nFolder: ${folderName}\nCreated: ${new Date().toISOString()}`;
+                  const markerBlob = new Blob([markerContent], { type: 'text/plain' });
+                  const uploadResult = await window.uploadBytes(markerRef, markerBlob);
+                  console.log(`✅ Storage folder created: ${folderName}`, uploadResult);
+                } else {
+                  console.warn('Storage helpers not available:', { storage: !!window.storage, storageRef: !!window.storageRef, uploadBytes: !!window.uploadBytes });
+                }
+              } catch (storageErr) {
+                console.error('❌ Storage Error:', storageErr);
+                console.warn('Warning: Could not create storage folder (non-critical)', storageErr);
+              }
+
+              // Update application to link driver and mark as ADDED
               try {
                 await window.dbUpdate(window.dbRef(window.db, `applications/${appId}`), { 
                   DriverID: newDriverId,
+                  ApplicationStatus: 'APPROVED - ADDED',
                   ImportedAt: new Date().toISOString()
                 });
               } catch (e) {}
