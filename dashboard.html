@@ -225,38 +225,49 @@
           return dbt - da;
         });
 
-        // Build drivers array with ratings and reviews from feedback
-        const driversArr = Object.entries(rawDrivers || {})
-          // include only drivers that are active and whose linked user record still exists and is active
-          .filter(([key, d]) => d && d.IsActive === true && d.UserID && rawUsers && rawUsers[d.UserID] && rawUsers[d.UserID].IsActive !== false && !rawUsers[d.UserID].DeletedAt)
-          .map(([key, d]) => {
-            const user = rawUsers && rawUsers[d.UserID];
-            const name = makeFullName(user);
-            // total rides: count bookings for this driver
-            const totalRides = Object.values(rawBookings || {}).filter(b => String(b.DriverID) === String(key)).length;
+        // Build drivers array by deriving from users/ (canonical) and merging drivers/ for status and vehicle info
+        const driversArr = Object.entries(rawUsers || {})
+          // include only users with RoleID === 2 (drivers) and who are active in users/
+          .filter(([userId, u]) => u && String(u.RoleID) === '2' && u.IsActive === true && !u.DeletedAt)
+          .map(([userId, u]) => {
+            // find matching driver record (if any)
+            let drvKey = null;
+            let d = null;
+            for (const [k, drv] of Object.entries(rawDrivers || {})) {
+              if (!drv) continue;
+              if (String(drv.UserID) === String(userId)) { drvKey = k; d = drv; break; }
+            }
+            // Only include if a driver record exists and its Status is explicitly 'Active'
+            if (!d || d.Status !== 'Active') return null;
+
+            const name = makeFullName(u);
+            // total rides: count bookings for this driver (driver key is drvKey)
+            const totalRides = drvKey ? Object.values(rawBookings || {}).filter(b => String(b.DriverID) === String(drvKey)).length : 0;
             // feedback for this driver's bookings
-            const feedbacks = Object.values(rawFeedback || {}).filter(f => {
+            const feedbacks = drvKey ? Object.values(rawFeedback || {}).filter(f => {
               const bid = String(f.BookingID);
               const booking = rawBookings && rawBookings[bid];
-              return booking && String(booking.DriverID) === String(key) && (typeof f.Rating !== 'undefined');
-            });
+              return booking && String(booking.DriverID) === String(drvKey) && (typeof f.Rating !== 'undefined');
+            }) : [];
             const rating = feedbacks.length ? (feedbacks.reduce((s, f) => s + Number(f.Rating || 0), 0) / feedbacks.length) : 0;
             const reviews = feedbacks.map(f => f.Comments || (f.Message || '')).filter(Boolean);
+
             return {
-              id: key,
+              id: drvKey || `user-${userId}`,
               name,
-              tricycle: d.TricycleNumber || d.Tricycle || '',
-              license: d.LicenseNumber || d.License || '',
-              contact: user ? user.MobileNumber : '',
-              location: (user && user.Address) || (user && user.Location) || '',
-              status: d.Status === 'Active' ? 'Online' : (d.Status || 'Offline'),
-              joined: user ? (user.CreatedAt || '') : '',
+              tricycle: d.TricycleNumber || d.TricyclePlateNumber || '',
+              license: d.LicenseNumber || '',
+              contact: u ? u.MobileNumber : '',
+              location: (u && u.Address) || (u && u.Location) || '',
+              status: 'Online', // since we only include drivers with drivers/*.Status === 'Active'
+              joined: u ? (u.CreatedAt || '') : '',
               totalRides,
               rating,
               reviews,
               image: 'tricy.png'
             };
-          });
+          })
+          .filter(Boolean);
 
         // Build passengers array
         const passengersArr = Object.entries(rawPassengers || {})
