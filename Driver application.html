@@ -148,10 +148,9 @@
       const [searchQuery, setSearchQuery] = React.useState('');
       const [isProcessing, setIsProcessing] = React.useState(false);
 
-      // Raw drivers, users and applications from DB (so applications can reference driver records)
+      // Raw drivers and users from DB (we now derive applicants from users where RoleID === 2)
       const [rawDrivers, setRawDrivers] = React.useState({});
       const [rawUsers, setRawUsers] = React.useState({});
-      const [rawApplications, setRawApplications] = React.useState({});
       const [selectedPasswordVisible, setSelectedPasswordVisible] = React.useState(false);
 
       // Helper function for status colors (must be before useEffect that uses it)
@@ -177,151 +176,92 @@
         return () => { try { unsubD(); } catch(e) {} try { unsubU(); } catch(e) {} };
       }, []);
 
-      // Listen to applications node and keep a raw snapshot; merging will be recomputed in a separate effect
+      // Recompute merged applicants list whenever users or drivers change;
+      // applicants are derived from users where RoleID === 2 (drivers) and merged with drivers/ record when available
       React.useEffect(() => {
-        if (!window.db || !window.dbRef || !window.dbOnValue) return;
-        const appsRef = window.dbRef(window.db, 'applications');
-        const unsub = window.dbOnValue(appsRef, snap => {
-          const val = snap.val() || {};
-          try { console.debug('applications.onValue -> snapshot count', Object.keys(val||{}).length); } catch(e) {}
-          setRawApplications(val);
-        });
+        try { console.debug('Recomputing applicants from rawUsers/rawDrivers', Object.keys(rawUsers||{}).length, Object.keys(rawDrivers||{}).length); } catch(e) {}
+        const usersVal = rawUsers || {};
+        const items = [];
 
-        return () => { try { unsub(); } catch(e) {} };
-      }, []);
+        for (const [userId, userRec] of Object.entries(usersVal)) {
+          if (!userRec) continue;
+          // Only consider users with RoleID === 2 (driver role per new flow)
+          if (String(userRec.RoleID) !== '2') continue;
+          // Skip soft-deleted users
+          if (userRec.DeletedAt) continue;
 
-      // Recompute merged applicants list whenever any source changes: applications, drivers, users
-      React.useEffect(() => {
-        try { console.debug('Recomputing applicants from rawApplications/rawDrivers/rawUsers', Object.keys(rawApplications||{}).length, Object.keys(rawDrivers||{}).length, Object.keys(rawUsers||{}).length); } catch(e) {}
-        const val = rawApplications || {};
-        const items = Object.entries(val).map(([key, a]) => {
-          const userExists = !a.UserID || (rawUsers && rawUsers[a.UserID] && rawUsers[a.UserID].IsActive !== false && !rawUsers[a.UserID].DeletedAt);
-          if (a.UserID && !userExists) return null;
+          // find driver record for this user (if any)
+          let drvEntry = null;
+          for (const [drvId, drv] of Object.entries(rawDrivers || {})) {
+            if (!drv) continue;
+            if (String(drv.UserID) === String(userId)) {
+              drvEntry = { id: drvId, rec: drv };
+              break;
+            }
+          }
 
-          const statusRaw = (a.ApplicationStatus || a.status || 'TO REVIEW').toString();
+          const name = [userRec.Firstname, userRec.Middlename, userRec.Lastname].filter(Boolean).join(' ') || userRec.name || 'Applicant';
+          const contact = userRec.MobileNumber || userRec.contact || '';
+          const license = drvEntry ? (drvEntry.rec.LicenseNumber || drvEntry.rec.license || '') : '';
+          const plate = drvEntry ? (drvEntry.rec.TricyclePlateNumber || drvEntry.rec.TricycleNumber || '') : '';
+          const franchiseExpiry = drvEntry ? (drvEntry.rec.FranchiseExpiry || '') : '';
+          const appStatus = drvEntry ? (drvEntry.rec.ApplicationStatus || drvEntry.rec.Status || 'TO REVIEW') : 'TO REVIEW';
+
+          const statusRaw = (appStatus || 'TO REVIEW').toString();
           const statusWords = statusRaw.toUpperCase().split(/[\s\-]/).filter(Boolean);
-          const status = statusWords[0] === 'TO' ? 'TO REVIEW' : statusWords[0] || 'TO REVIEW';
-          const files = a.files || {};
-
-          let name = a.name || `${a.Firstname || ''} ${a.Lastname || ''}`.trim() || 'Applicant';
-          let contact = a.contact || a.MobileNumber || '';
-          let license = a.license || a.LicenseNumber || '';
-          let plate = a.plate || a.TricyclePlateNumber || a.TricycleNumber || '';
-
-          try {
-            // If application references a canonical user, prefer that user's data
-            if (a.UserID && rawUsers && rawUsers[a.UserID]) {
-              const userRecApp = rawUsers[a.UserID];
-              name = [userRecApp.Firstname, userRecApp.Middlename, userRecApp.Lastname].filter(Boolean).join(' ') || name;
-              contact = userRecApp.MobileNumber || contact;
-            }
-            const driverRefId = a.DriverID || a.driverId || a.DriverId || null;
-              if (driverRefId && rawDrivers && rawDrivers[String(driverRefId)]) {
-              const drv = rawDrivers[String(driverRefId)];
-              license = drv.LicenseNumber || drv.license || license;
-              plate = drv.TricyclePlateNumber || drv.TricycleNumber || drv.tricycle || plate;
-              const userRec = rawUsers && rawUsers[drv.UserID];
-              if (userRec) {
-                name = [userRec.Firstname, userRec.Middlename, userRec.Lastname].filter(Boolean).join(' ') || name;
-                contact = userRec.MobileNumber || contact;
-              }
-            }
-          } catch (e) {}
+          let status = statusWords[0] === 'TO' ? 'TO REVIEW' : statusWords[0] || 'TO REVIEW';
+          // Do not map 'APPROVED' to 'ADDED' here — display-only 'ADDED' is managed in Driver Management
 
           const initials = (name || 'Applicant').split(' ').map(n => n[0]||'').join('').slice(0,2).toUpperCase();
 
-          let displayStatus = status;
-          try {
-            // Show "ADDED" only if ApplicationStatus is APPROVED AND the driver record exists in drivers/
-            // Otherwise show the actual status (EXPIRED, TO REVIEW, REJECTED, APPROVED, etc.)
-            if (status === 'APPROVED') {
-              // Check if a corresponding driver record exists
-              const driverRefId = a.DriverID || a.driverId || a.DriverId || null;
-              const driverExists = driverRefId && rawDrivers && rawDrivers[String(driverRefId)];
-              if (driverExists) {
-                displayStatus = 'ADDED';
-              }
-              // Otherwise keep status as APPROVED (not ADDED)
-            }
-          } catch(e) {}
-
-          return {
-            id: key,
-            userId: a.UserID || null,
+          items.push({
+            id: `user-${userId}`,
+            userId: userId,
+            drvId: drvEntry ? drvEntry.id : null,
             name,
             contact,
             license,
             plate,
-            status: displayStatus,
-            registeredDate: formatIsoForDisplay(a.CreatedAt || a.registeredDate || ''),
-            franchiseExpiry: a.FranchiseExpiry || a.franchiseExpiry || '',
+            status,
+            registeredDate: formatIsoForDisplay(userRec.CreatedAt || ''),
+            franchiseExpiry,
             initials,
-            color: getStatusColor(displayStatus),
-            files
-          };
-        }).filter(Boolean);
+            color: getStatusColor(status),
+            files: drvEntry && drvEntry.rec.files ? drvEntry.rec.files : {}
+          });
+        }
 
-        const existingLicenses = new Set(items.map(a => (a.license || '').toUpperCase().replace(/[^A-Z0-9]/g, '').toLowerCase()));
-        // Track UserIDs already added to avoid duplicates (same person appearing in both applications and drivers)
-        const addedUserIds = new Set(items.map(a => a.userId).filter(Boolean));
-        
-        // Include ALL drivers (including soft-deleted/inactive) so they appear in the applicants list
-        const driversOnly = Object.entries(rawDrivers || {}).filter(([drvId, drv]) => {
-          if (!drv) return false;
-          // Skip if this UserID was already added from applications (same person, different record type)
-          if (drv.UserID && addedUserIds.has(drv.UserID)) return false;
-          // Include drivers regardless of IsActive or DeletedAt status
-          if (drv.UserID && (!rawUsers[drv.UserID] || rawUsers[drv.UserID].IsActive === false || rawUsers[drv.UserID].DeletedAt)) return false;
-          const drvLicense = drv.LicenseNumber || drv.license || '';
-          const norm = (drvLicense || '').toUpperCase().replace(/[^A-Z0-9]/g, '').toLowerCase();
-          return norm && !existingLicenses.has(norm);
-        });
+        // Also include any drivers that reference users not present (defensive)
+        for (const [drvId, drv] of Object.entries(rawDrivers || {})) {
+          if (!drv) continue;
+          if (drv.UserID && rawUsers && rawUsers[String(drv.UserID)]) continue; // already included
+          const name = drv.Name || drv.name || 'Applicant';
+          const contact = drv.MobileNumber || drv.contact || '';
+          const license = drv.LicenseNumber || drv.license || '';
+          const plate = drv.TricyclePlateNumber || drv.TricycleNumber || '';
+          const statusRaw = (drv.ApplicationStatus || drv.Status || 'TO REVIEW').toString();
+          const statusWords = statusRaw.toUpperCase().split(/[\s\-]/).filter(Boolean);
+          const status = statusWords[0] === 'TO' ? 'TO REVIEW' : statusWords[0] || 'TO REVIEW';
+          const initials = (name || 'Applicant').split(' ').map(n => n[0]||'').join('').slice(0,2).toUpperCase();
+          items.push({
+            id: `drv-${drvId}`,
+            drvId,
+            userId: drv.UserID || null,
+            name,
+            contact,
+            license,
+            plate,
+            status,
+            registeredDate: formatIsoForDisplay(drv.CreatedAt || ''),
+            franchiseExpiry: drv.FranchiseExpiry || '',
+            initials,
+            color: getStatusColor(status),
+            files: drv.files || {}
+          });
+        }
 
-        try {
-          for (const [drvId, drv] of driversOnly) {
-            if (!drv) continue;
-            // Include soft-deleted drivers so they still appear in the list
-            if (drv.UserID && !rawUsers[drv.UserID]) continue;
-            const drvLicense = drv.LicenseNumber || drv.license || '';
-            const norm = (drvLicense || '').toUpperCase().replace(/[^A-Z0-9]/g, '').toLowerCase();
-            const statusRaw = (drv.ApplicationStatus || drv.Status || 'TO REVIEW').toString();
-            const statusWords = statusRaw.toUpperCase().split(/[\s\-]/).filter(Boolean);
-            const status = statusWords[0] === 'TO' ? 'TO REVIEW' : statusWords[0] || 'TO REVIEW';
-            try { console.debug('Driver drv-' + drvId, '-> statusRaw:', statusRaw, '-> status:', status); } catch(e) {}
-            const userRec = rawUsers && rawUsers[drv.UserID];
-            const name = userRec ? [userRec.Firstname, userRec.Middlename, userRec.Lastname].filter(Boolean).join(' ') : (drv.Name || drv.name || 'Applicant');
-            const contact = userRec ? userRec.MobileNumber : (drv.MobileNumber || drv.contact || '');
-            const plate = drv.TricyclePlateNumber || drv.TricycleNumber || drv.tricycle || '';
-            const initials = (name || 'Applicant').split(' ').map(n => n[0]||'').join('').slice(0,2).toUpperCase();
-
-            items.push({
-              id: `drv-${drvId}`,
-              name,
-              contact,
-              license: drvLicense,
-              plate,
-              status,
-              registeredDate: formatIsoForDisplay(drv.CreatedAt || drv.registeredDate || ''),
-              franchiseExpiry: drv.FranchiseExpiry || drv.franchiseExpiry || '',
-              initials,
-              color: getStatusColor(status),
-              files: drv.files || {},
-              drvId
-            });
-            existingLicenses.add(norm);
-          }
-        } catch(e) { console.warn('Error merging drivers into applicants list', e); }
-
-        // Deduplicate by ID to prevent showing same driver twice
-        const seenIds = new Set();
-        const deduplicatedItems = items.filter(item => {
-          if (seenIds.has(item.id)) return false;
-          seenIds.add(item.id);
-          return true;
-        });
-
-        setApplicants(deduplicatedItems);
-      }, [rawApplications, rawDrivers, rawUsers]);
+        setApplicants(items);
+      }, [rawDrivers, rawUsers]);
 
       // Date formatting helpers: display without 'T' and without milliseconds/Z
       const formatIsoForDisplay = (iso) => {
@@ -392,31 +332,28 @@
           franchiseExpiry: app.franchiseExpiry || ''
         };
         
-        // Ensure UserID is always captured (critical for saving back to applications/)
+        // Ensure UserID is always captured. Our applicants come from users/ (id like 'user-<id>')
         if (!base.UserID) {
-          // Try to find UserID from rawApplications using the application key
-          if (app.id && rawApplications && rawApplications[app.id]) {
-            base.UserID = rawApplications[app.id].UserID || '';
-          }
+          if (app.userId) base.UserID = app.userId || '';
+          else if (app.id && typeof app.id === 'string' && app.id.startsWith('user-')) base.UserID = app.id.replace(/^user-/, '');
         }
-        
-        // Prefill license and tricycle from applications record if available
+
+        // If this row maps to a driver record (drvId), prefill license/tricycle from that driver
         try {
-          if (app.id && rawApplications && rawApplications[app.id]) {
-            const appRec = rawApplications[app.id];
-            if (appRec.LicenseNumber) {
-              base.license = appRec.LicenseNumber;
-            }
-            if (appRec.TricyclePlateNumber) {
-              base.plate = appRec.TricyclePlateNumber;
-            } else if (appRec.TricycleNumber) {
-              base.plate = appRec.TricycleNumber;
-            }
-            // support a distinct internal tricycle number field if present
-            if (appRec.InternalTricycleNumber || appRec.TricycleInternal || appRec.TricycleNo) {
-              base.tricycleNumber = appRec.InternalTricycleNumber || appRec.TricycleInternal || appRec.TricycleNo;
-            } else if (appRec.TricycleNumber && !base.tricycleNumber) {
-              base.tricycleNumber = appRec.TricycleNumber;
+          if (app.drvId) {
+            const drv = rawDrivers && rawDrivers[String(app.drvId)];
+            if (drv) {
+              base.UserID = drv.UserID || base.UserID || '';
+              base.license = drv.LicenseNumber || drv.license || base.license || '';
+              base.plate = drv.TricyclePlateNumber || base.plate || '';
+              base.tricycleNumber = drv.TricycleNumber || base.tricycleNumber || '';
+              base.franchiseExpiry = drv.FranchiseExpiry || base.franchiseExpiry || '';
+              const userRec = rawUsers && rawUsers[drv.UserID];
+              if (userRec) {
+                base.contact = stripPhonePrefix(userRec.MobileNumber || base.contact || '');
+                base.name = [userRec.Firstname, userRec.Middlename, userRec.Lastname].filter(Boolean).join(' ') || base.name;
+              }
+              base.registeredDate = formatIsoForDisplay(drv.CreatedAt || drv.registeredDate || base.registeredDate || '');
             }
           }
         } catch (e) {}
@@ -444,28 +381,20 @@
           }
         } catch (e) {}
 
-        // Prefer canonical ApplicationStatus from the applications/ node when available
-        // This prevents mixing the computed display status (e.g. 'ADDED') into the stored field.
+        // ApplicationStatus is stored in drivers/ when present; otherwise default to TO REVIEW
         try {
-          if (base.id && rawApplications && rawApplications[base.id]) {
-            const appRec = rawApplications[base.id];
-            base.ApplicationStatus = (appRec.ApplicationStatus || appRec.status || base.ApplicationStatus || 'TO REVIEW').toString().toUpperCase();
-          } else if (!base.ApplicationStatus) {
+          if (base.drvId) {
+            const drv = rawDrivers && rawDrivers[String(base.drvId)];
+            base.ApplicationStatus = (drv && (drv.ApplicationStatus || drv.Status) ? (drv.ApplicationStatus || drv.Status) : 'TO REVIEW').toString().toUpperCase();
+          } else {
             base.ApplicationStatus = (base.status || 'TO REVIEW').toString().toUpperCase();
           }
         } catch (e) {
-          if (!base.ApplicationStatus) base.ApplicationStatus = 'TO REVIEW';
+          base.ApplicationStatus = 'TO REVIEW';
         }
-        // Compute a display-only status (ADDED) when ApplicationStatus is APPROVED and a driver record exists.
+        // Display status mirrors ApplicationStatus here (do not convert APPROVED -> ADDED in this view)
         try {
-          let computedDisplay = base.ApplicationStatus || 'TO REVIEW';
-          if ((computedDisplay || '').toString().toUpperCase() === 'APPROVED') {
-            const appRec = (rawApplications && rawApplications[base.id]) || {};
-            const driverRefId = appRec.DriverID || appRec.driverId || appRec.DriverId || null;
-            const driverExists = (driverRefId && rawDrivers && rawDrivers[String(driverRefId)]) || (typeof base.id === 'string' && base.id.startsWith('drv-') && rawDrivers && rawDrivers[String(base.id.replace(/^drv-/, ''))]);
-            if (driverExists) computedDisplay = 'ADDED';
-          }
-          base.displayStatus = computedDisplay;
+          base.displayStatus = base.ApplicationStatus || 'TO REVIEW';
         } catch (e) { base.displayStatus = base.ApplicationStatus || 'TO REVIEW'; }
 
         // Strip +63 prefix from contact for display (will be re-added on save)
@@ -570,49 +499,19 @@
               driverUpdatePayload.TricyclePlateNumber = payload.plate || '';
               driverUpdatePayload.TricycleNumber = payload.tricycleNumber || '';
               if (payload.franchiseExpiry) driverUpdatePayload.FranchiseExpiry = payload.franchiseExpiry;
-              // If status is EXPIRED, mark driver inactive and offline
+              // Update status label only; driver activation/online state are managed in Driver Management
               if (appStatus === 'EXPIRED') {
-                driverUpdatePayload.IsActive = false;
                 driverUpdatePayload.Status = 'Inactive';
-                driverUpdatePayload.IsOnline = false;
               } else {
-                // keep driver active if not expired
-                driverUpdatePayload.IsActive = true;
                 driverUpdatePayload.Status = 'Active';
-                // go online only when approved
-                driverUpdatePayload.IsOnline = appStatus === 'APPROVED';
               }
 
               try { console.debug('Updating driver', drvId, 'with payload:', driverUpdatePayload); } catch(e) {}
               await window.dbUpdate(drvRef, driverUpdatePayload);
               try { console.debug('Driver update completed for', drvId); } catch(e) {}
 
-              // Also update any applications/ entries that reference the same license (avoid UI flip-flop)
-              try {
-                const normalizeStr = s => (s||'').toString().toUpperCase().replace(/[^A-Z0-9]/g, '');
-                const drvLicense = payload.license || selected.license || '';
-                const drvNorm = normalizeStr(drvLicense);
-                const appsSnap = await window.dbGet(window.dbRef(window.db, 'applications'));
-                const appsVal = appsSnap.val() || {};
-                for (const [appKey, appRec] of Object.entries(appsVal)) {
-                  const appLicense = appRec.LicenseNumber || appRec.license || appRec.licenseNumber || '';
-                  if (normalizeStr(appLicense) === drvNorm) {
-                    try {
-                        await window.dbUpdate(window.dbRef(window.db, `applications/${appKey}`), { 
-                        ApplicationStatus: appStatus, 
-                        status: appStatus,
-                        LicenseNumber: payload.license || '',
-                        TricyclePlateNumber: payload.plate || '',
-                        TricycleNumber: payload.tricycleNumber || ''
-                      });
-                    } catch (e) {
-                      console.warn('Failed to update application', appKey, e);
-                    }
-                  }
-                }
-              } catch (e) {
-                console.warn('Error syncing to applications node', e);
-              }
+              // applications/ node is no longer the canonical source in the new flow.
+              // Drivers/ is canonical for application status; we avoid touching applications/ here.
 
               // Send notification to linked user (if available) and update user contact/name if edited
               try {
@@ -659,16 +558,8 @@
                 // Compute display status: if APPROVED and a driver exists, show ADDED (display-only)
                 let displayStatusAfter = appStatus;
                 try {
-                  if (appStatus === 'APPROVED') {
-                    if (typeof selected.id === 'string' && selected.id.startsWith('drv-')) {
-                      const drvId = selected.id.replace(/^drv-/, '');
-                      if (rawDrivers && rawDrivers[String(drvId)]) displayStatusAfter = 'ADDED';
-                    } else {
-                      const appRec = (rawApplications && rawApplications[selected.id]) || {};
-                      const driverRefId = appRec.DriverID || appRec.driverId || appRec.DriverId || null;
-                      if (driverRefId && rawDrivers && rawDrivers[String(driverRefId)]) displayStatusAfter = 'ADDED';
-                    }
-                  }
+                  // Keep display status consistent with ApplicationStatus; mapping to 'ADDED' only happens in Driver Management
+                  // (do not convert 'APPROVED' to 'ADDED' here)
                 } catch (e) {}
 
                 updatedApplicants[selectedIndex] = { ...updatedApplicants[selectedIndex], ...payload, status: displayStatusAfter, color: getStatusColor(displayStatusAfter) };
@@ -718,114 +609,114 @@
           } catch (e) {
             console.warn('Failed to update user password for application edit', e);
           }
-          window.dbUpdate(appRef, appPayload).then(async () => {
-            const updatedApplicants = [...applicants];
-            updatedApplicants[selectedIndex] = { 
-              ...updatedApplicants[selectedIndex], 
-              ApplicationStatus: appStatus, 
-              // compute display status after this change
-              status: (function(){
-                try {
-                  if (appStatus === 'APPROVED') {
-                    const appRec = (rawApplications && rawApplications[selected.id]) || {};
-                    const driverRefId = appRec.DriverID || appRec.driverId || appRec.DriverId || null;
-                    if (driverRefId && rawDrivers && rawDrivers[String(driverRefId)]) return 'ADDED';
-                  }
-                  return appStatus;
-                } catch(e) { return appStatus; }
-              })(),
-              license: formattedLicense || selected.license || '',
-              plate: selected.plate || ''
-            };
-            setApplicants(updatedApplicants);
-
-            // Find matching drivers by UserID/DriverID (license fallback) and sync their ApplicationStatus to match the application
+          // Persist applicant changes via users/ and drivers/ (applications/ is deprecated)
+          try {
+            const userIdVal = selected.userId || (selected.id && selected.id.startsWith('user-') ? selected.id.replace(/^user-/, '') : selected.UserID || '');
+            // persist password to users/<id> if admin edited it
             try {
-              const normalizeStr = s => (s||'').toString().toUpperCase().replace(/[^A-Z0-9]/g, '');
-              const updatedRawDrivers = { ...(rawDrivers || {}) };
-
-              // Fetch fresh application record to determine canonical UserID/DriverID (if any)
-              const appsSnap2 = await window.dbGet(window.dbRef(window.db, 'applications'));
-              const appsVal2 = appsSnap2.val() || {};
-              const appRec = appsVal2[selected.id] || {};
-              const appUserId = appRec.UserID || appPayload.UserID || '';
-              const appDriverId = appRec.DriverID || appPayload.DriverID || '';
-              const appLicenseNorm = normalizeStr(selected.license || payload.license || '');
-
-              for (const [drvKey, drvRec] of Object.entries(rawDrivers || {})) {
-                try {
-                  const drvUserId = drvRec && drvRec.UserID;
-                  const drvLicenseNorm = normalizeStr(drvRec.LicenseNumber || drvRec.license || '');
-
-                  const matches = (appUserId && drvUserId && String(appUserId) === String(drvUserId))
-                    || (appDriverId && String(appDriverId) === String(drvKey))
-                    || (appLicenseNorm && drvLicenseNorm && drvLicenseNorm === appLicenseNorm);
-
-                  if (!matches) continue;
-
-                  // Compute driver update payload based on new application status
-                  const driverUpdate = { ApplicationStatus: appStatus };
-                  if (appStatus === 'EXPIRED') {
-                    driverUpdate.IsActive = false;
-                    driverUpdate.Status = 'Inactive';
-                    driverUpdate.IsOnline = false;
-                  } else {
-                    driverUpdate.IsActive = true;
-                    driverUpdate.Status = 'Active';
-                    driverUpdate.IsOnline = appStatus === 'APPROVED';
-                  }
-
-                    // Only update tricycle fields if they were provided in the edit
-                    // Unconditionally update plate/tricycle fields so DB and UI stay in sync
-                    driverUpdate.TricyclePlateNumber = payload.plate || '';
-                    driverUpdate.TricycleNumber = payload.tricycleNumber || '';
-                    // if neither field was edited, preserve existing values by not including them in the update
-                    await window.dbUpdate(window.dbRef(window.db, `drivers/${drvKey}`), driverUpdate);
-
-                  // Update local rawDrivers so UI updates immediately
-                  updatedRawDrivers[drvKey] = { ...(drvRec || {}), ...driverUpdate };
-
-                  // notify linked user
-                  const userId = drvRec && drvRec.UserID;
-                  if (userId) {
-                    const notifRef = window.dbRef(window.db, `users/${userId}/notifications/${Date.now()}`);
-                    await window.dbSet(notifRef, {
-                      type: 'APPLICATION_STATUS_UPDATE',
-                      message: `Your application status is now ${appStatus}`,
-                      createdAt: Date.now(),
-                      seen: false
-                    });
-                  }
-                } catch (e) {
-                  console.warn('Failed to sync driver for application status change', e);
-                }
+              if (userIdVal && (typeof selected.password !== 'undefined')) {
+                await window.dbUpdate(window.dbRef(window.db, `users/${userIdVal}`), { Password: selected.password || '' });
               }
+            } catch (e) { console.warn('Failed to update user password for applicant edit', e); }
 
-              // apply local update once
-              try { setRawDrivers(updatedRawDrivers); } catch(e) {}
-              // Also force a fresh read to ensure listeners and other clients reconcile quickly
-              try {
-                const driversSnap = await window.dbGet(window.dbRef(window.db, 'drivers'));
-                const drvVal = driversSnap.val() || {};
-                setRawDrivers(drvVal);
-                try { console.debug('Refreshed drivers after app update', Object.keys(drvVal).length); } catch(e) {}
-              } catch(e) { console.warn('Failed to refresh drivers after app update', e); }
-              // Refresh applications snapshot too so recompute runs and UI updates immediately
-              try {
-                const appsSnap3 = await window.dbGet(window.dbRef(window.db, 'applications'));
-                const appsVal3 = appsSnap3.val() || {};
-                setRawApplications(appsVal3);
-                try { console.debug('Refreshed applications after app update', Object.keys(appsVal3).length); } catch(e) {}
-              } catch(e) { console.warn('Failed to refresh applications after app update', e); }
+            // If this applicant already has a driver record, update it
+            if (selected.drvId) {
+              const drvKey = selected.drvId;
+              const driverUpdate = { ApplicationStatus: appStatus };
+              // Do not toggle driver/user activation or online flags here; only update status label
+              if (appStatus === 'EXPIRED') {
+                driverUpdate.Status = 'Inactive';
+              } else {
+                driverUpdate.Status = 'Active';
+              }
+              driverUpdate.TricyclePlateNumber = payload.plate || '';
+              driverUpdate.TricycleNumber = payload.tricycleNumber || '';
+              if (payload.license) driverUpdate.LicenseNumber = payload.license;
+              if (payload.franchiseExpiry) driverUpdate.FranchiseExpiry = payload.franchiseExpiry;
+              await window.dbUpdate(window.dbRef(window.db, `drivers/${drvKey}`), driverUpdate);
 
-            } catch(e) {
-              console.warn('Error syncing to drivers node after application update', e);
-            }            window.showAlert("Changes saved for " + selected.name, 'success');
+              // update user contact/name if present
+              try {
+                if (userIdVal) {
+                  const userRef = window.dbRef(window.db, `users/${userIdVal}`);
+                  const nameParts = (payload.name || '').trim().split(/\s+/).filter(Boolean);
+                  const toUpd = {};
+                  if (nameParts.length) {
+                    toUpd.Firstname = nameParts[0] || '';
+                    toUpd.Lastname = nameParts.length > 1 ? nameParts[nameParts.length-1] : '';
+                    toUpd.Middlename = nameParts.length > 2 ? nameParts.slice(1, -1).join(' ') : '';
+                  }
+                  if (payload.contact) toUpd.MobileNumber = payload.contact;
+                  if (Object.keys(toUpd).length) await window.dbUpdate(userRef, toUpd);
+                }
+              } catch (e) { console.warn('Failed to update user info after driver change', e); }
+
+              // notify user
+              try {
+                const notifRef = window.dbRef(window.db, `users/${userIdVal}/notifications/${Date.now()}`);
+                await window.dbSet(notifRef, { type: 'APPLICATION_STATUS_UPDATE', message: `Your application status is now ${appStatus}`, createdAt: Date.now(), seen: false });
+              } catch (e) { console.warn('Failed to notify user', e); }
+
+              // refresh drivers
+              try { const driversSnap = await window.dbGet(window.dbRef(window.db, 'drivers')); setRawDrivers(driversSnap.val() || {}); } catch(e) {}
+
+              // update local applicants list
+              try { const updatedApplicants = [...applicants]; updatedApplicants[selectedIndex] = { ...updatedApplicants[selectedIndex], ...payload, status: appStatus, color: getStatusColor(appStatus) }; setApplicants(updatedApplicants); } catch (e) {}
+
+              window.showAlert('Changes saved for ' + selected.name, 'success');
+              closeModal();
+              return;
+            }
+
+            // No driver record yet: update user and create driver record if needed
+            if (userIdVal) {
+              try {
+                const userRef = window.dbRef(window.db, `users/${userIdVal}`);
+                const nameParts = (payload.name || '').trim().split(/\s+/).filter(Boolean);
+                const toUpd = {};
+                if (nameParts.length) {
+                  toUpd.Firstname = nameParts[0] || '';
+                  toUpd.Lastname = nameParts.length > 1 ? nameParts[nameParts.length-1] : '';
+                  toUpd.Middlename = nameParts.length > 2 ? nameParts.slice(1, -1).join(' ') : '';
+                }
+                if (payload.contact) toUpd.MobileNumber = payload.contact;
+                if (typeof selected.password !== 'undefined') toUpd.Password = selected.password || '';
+                if (Object.keys(toUpd).length) await window.dbUpdate(userRef, toUpd);
+              } catch (e) { console.warn('Failed to update user record for applicant', e); }
+            }
+
+            // Create driver record if license/plate provided or status is APPROVED
+            if (payload.license || payload.plate || appStatus === 'APPROVED') {
+              try {
+                const newDrvId = await claimSmallestNumericId('drivers');
+                const drvPayload = {
+                  UserID: userIdVal || null,
+                  LicenseNumber: payload.license || '',
+                  TricyclePlateNumber: payload.plate || '',
+                  TricycleNumber: payload.tricycleNumber || payload.plate || '',
+                  FranchiseExpiry: payload.franchiseExpiry || '',
+                  // keep IsApplying true unless the driver was explicitly 'ADDED' in Driver Management
+                  IsApplying: appStatus === 'ADDED' ? false : true,
+                  ApplicationStatus: appStatus,
+                  CreatedAt: new Date().toISOString()
+                };
+                await window.dbSet(window.dbRef(window.db, `drivers/${newDrvId}`), drvPayload);
+                if (userIdVal) await window.dbUpdate(window.dbRef(window.db, `users/${userIdVal}`), { DriverID: newDrvId, RoleID: 2 });
+                try { const driversSnap = await window.dbGet(window.dbRef(window.db, 'drivers')); setRawDrivers(driversSnap.val() || {}); } catch(e) {}
+                window.showAlert('Applicant updated and driver record created', 'success');
+                closeModal();
+                return;
+              } catch (e) { console.error('Failed to create driver record', e); window.showAlert('Failed to create driver record', 'error'); }
+            }
+
+            window.showAlert('Changes saved for ' + selected.name, 'success');
             closeModal();
-          }).catch(err => {
-            console.error('Error updating application:', err);
+            return;
+          } catch (err) {
+            console.error('Error updating applicant:', err);
             window.showAlert('Error saving changes: ' + (err.message || err), 'error');
-          });
+            return;
+          }
         }
       };
 
@@ -872,12 +763,13 @@
             MobileNumber: selected.contact || '',
             Email: selected.email || '',
             Role: 'Driver',
-            // RoleID numeric for driver role (use 3 as driver code)
-            RoleID: 3,
+            // RoleID numeric for driver role (use 2 as driver code)
+            RoleID: 2,
             // store admin-provided password in plain text (per request)
             Password: selected.password || '',
             CreatedAt: new Date().toISOString(),
-            IsActive: true
+            // Do not activate user here; activation happens in Driver Management
+            IsActive: false
           };
 
           // userId is now a NUMBER from claimSmallestNumericId, use it directly
@@ -893,9 +785,7 @@
             TricyclePlateNumber: selected.plate || '',
             TricycleNumber: selected.tricycleNumber || selected.plate || '',
             ApplicationStatus: 'APPROVED',
-            IsActive: true,
-            // Newly approved drivers should be available/online to accept bookings
-            IsOnline: true,
+            // Driver-level IsActive/IsOnline are not stored here. User record owns IsActive.
             CreatedAt: new Date().toISOString()
           };
 
@@ -905,28 +795,23 @@
 
           // Update user record to include DriverID reference
           try {
-            await window.dbUpdate(userRef, { DriverID: driverId, RoleID: 3 });
+            await window.dbUpdate(userRef, { DriverID: driverId, RoleID: 2 });
           } catch (e) {
             console.warn('Failed to update user with DriverID/RoleID after adding driver', e);
           }
 
           // (no explicit allocation writes here — reservation is handled inside claimSmallestNumericId)
 
-          // Update application status with minimal fields (only essential data, no duplicates from users/)
-          const appRef = window.dbRef(window.db, `applications/${selected.id}`);
+          // Update local UI state (no longer writing to legacy `applications/` node)
           const payload = {
-            UserID: userId, // Store as number, not string
-            DriverID: driverId, // Store as number, not string
+            UserID: userId,
+            DriverID: driverId,
             ApplicationStatus: 'APPROVED',
-            LicenseNumber: selected.license || '', // Include license from application
+            LicenseNumber: selected.license || '',
             TricyclePlateNumber: selected.plate || '',
             TricycleNumber: selected.tricycleNumber || selected.plate || '',
             CreatedAt: new Date().toISOString()
           };
-
-          await window.dbUpdate(appRef, payload);
-
-          // Update local UI state
           const updatedApplicants = [...applicants];
           if (typeof selectedIndex === 'number' && updatedApplicants[selectedIndex]) {
             updatedApplicants[selectedIndex] = { ...updatedApplicants[selectedIndex], ...payload };
@@ -1431,10 +1316,11 @@
             Email: emailPrepared,
             MobileNumber: phoneRaw,
             Role: 'Driver',
-            RoleID: 3,
+            RoleID: 2,
             Password: password || '',
             CreatedAt: new Date().toISOString(),
-            IsActive: true
+            // New applicant: IsActive should be false until approved
+            IsActive: false
           };
           // create user with numeric id (claim smallest available) instead of a push key
           // userId is now a NUMBER from claimSmallestNumericId, use it directly
@@ -1442,18 +1328,20 @@
           const userRef = window.dbRef(window.db, `users/${userId}`);
           await window.dbSet(userRef, userObj);
 
-          // Create an application entry with a numeric id (claim smallest available)
-          // appId is now a NUMBER from claimSmallestNumericId, use it directly
-          const appId = await claimSmallestNumericId('applications');
-          const appRef = window.dbRef(window.db, `applications/${appId}`);
-          const appObj = {
-            UserID: userId, // Store as number, not string
+          // Also create a drivers/ record for this applicant (IsApplying: true, ApplicationStatus: TO REVIEW)
+          const driverId = await claimSmallestNumericId('drivers');
+          const driverRef = window.dbRef(window.db, `drivers/${driverId}`);
+          const driverObj = {
+            UserID: userId,
+            LicenseNumber: '',
+            TricyclePlateNumber: '',
+            TricycleNumber: '',
+            FranchiseExpiry: '',
+            IsApplying: true,
             ApplicationStatus: 'TO REVIEW',
-            LicenseNumber: '', // Initially blank, user will fill in later
-            TricycleNumber: '', // Initially blank, user will fill in later
             CreatedAt: new Date().toISOString()
           };
-          await window.dbSet(appRef, appObj);
+          await window.dbSet(driverRef, driverObj);
 
           window.showAlert('Driver applicant added and marked as TO REVIEW', 'success');
           onClose();
