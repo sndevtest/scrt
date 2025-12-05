@@ -18,7 +18,7 @@
 
   <script type="module">
     import { initializeApp } from "https://www.gstatic.com/firebasejs/12.6.0/firebase-app.js";
-    import { getAuth, signInAnonymously, onAuthStateChanged } from "https://www.gstatic.com/firebasejs/12.6.0/firebase-auth.js";
+    import { getAuth, signInAnonymously, onAuthStateChanged, signOut } from "https://www.gstatic.com/firebasejs/12.6.0/firebase-auth.js";
     import { getDatabase, ref, onValue, get, set, update, push, runTransaction } from "https://www.gstatic.com/firebasejs/12.6.0/firebase-database.js";
     import { getStorage, ref as storageRef, uploadBytes, getBytes, list, listAll } from "https://www.gstatic.com/firebasejs/12.6.0/firebase-storage.js";
 
@@ -33,23 +33,148 @@
       measurementId: "G-2VWQ0C8EZE"
     };
 
+    window.firebaseApiKey = firebaseConfig.apiKey;
+
     const app = initializeApp(firebaseConfig);
     const auth = getAuth(app);
     const db = getDatabase(app);
     const storage = getStorage(app);
 
-    // Sign in anonymously for Storage/Database operations
-    signInAnonymously(auth).catch(err => {
-      console.error('Anonymous sign-in failed:', err);
-    });
+    // Admin session flags
+    window.adminAllowed = false; // whether admin operations are allowed (only authenticated admin user with RoleID = 4)
+    window.adminAnonymousAvailable = false; // whether anonymous sign-in is available (DEPRECATED - do not use)
 
-    // Monitor auth state
-    onAuthStateChanged(auth, (user) => {
-      if (user) {
-        console.log('✅ Authenticated as:', user.uid);
-        window.currentUser = user;
-      } else {
-        console.warn('⚠️ Not authenticated');
+    // NOTE: Anonymous sign-in is DISABLED in Firebase Console to enforce role-based access control.
+    // Only users with RoleID = 4 in the database can access this admin dashboard.
+
+    // Authentication Message and role enforcement
+    // Strategy: Check custom claims first (preferred), fall back to DB role lookup
+    onAuthStateChanged(auth, async (user) => {
+      try {
+        if (!user) {
+          console.warn('⚠️ Not authenticated');
+          window.currentUser = null;
+          return;
+        }
+
+        // Keep anonymous admin session active
+        if (user.isAnonymous) {
+          console.log('✅ Authenticated anonymously:', user.uid);
+          window.currentUser = user;
+          return;
+        }
+
+        // Non-anonymous sign-in detected (someone signed in with email/password)
+        console.log('🔐 Non-anonymous sign-in detected:', user.uid, user.email || 'no-email');
+
+        // PREFERRED: Check for custom claim 'admin' in ID token
+        let isAdminFromClaim = false;
+        try {
+          const idTokenResult = await user.getIdTokenResult();
+          isAdminFromClaim = idTokenResult && idTokenResult.claims && idTokenResult.claims.admin === true;
+          console.log('Custom claim check: admin=', isAdminFromClaim);
+          if (isAdminFromClaim) {
+            console.log('✅ Admin user signed in via custom claim:', user.uid);
+            window.currentUser = user;
+            window.adminAllowed = true;
+            return;
+          }
+        } catch (claimErr) {
+          console.warn('getIdTokenResult failed; falling back to DB role check:', claimErr);
+        }
+
+        // FALLBACK: Check Realtime Database role lookup for users/<uid> with RoleID === 4 (admin)
+        if (!window.db || !window.dbRef || !window.dbGet) {
+          console.warn('DB helpers not available; denying non-admin access');
+          try { await signOut(auth); } catch(e) { console.warn('signOut failed', e); }
+          window.currentUser = null;
+          window.adminAllowed = false;
+          return;
+        }
+
+        const usersSnap = await window.dbGet(window.dbRef(window.db, 'users'));
+        const usersVal = usersSnap && usersSnap.val() ? usersSnap.val() : {};
+        console.log('🔍 DEBUG: Searching for user with email:', user.email, 'and UID:', user.uid);
+        console.log('🔍 DEBUG: Available users in DB:', Object.keys(usersVal));
+        
+        let matched = null;
+        for (const [uidKey, u] of Object.entries(usersVal)) {
+          if (!u) continue;
+          
+          // Log each user's data for debugging
+          console.log(`🔍 DEBUG: Checking user ${uidKey}:`, {
+            email: u.Email || u.email,
+            authUID: u.AuthUID,
+            roleID: u.RoleID,
+            role: u.Role
+          });
+          
+          if (u.AuthUID && String(u.AuthUID) === String(user.uid)) {
+            console.log(`✅ DEBUG: AuthUID match found for user ${uidKey}`);
+            matched = { id: uidKey, rec: u };
+            break;
+          }
+          const uEmail = (u.Email || u.email || '').toString().toLowerCase();
+          if (user.email && uEmail && uEmail === (user.email||'').toString().toLowerCase()) {
+            console.log(`✅ DEBUG: Email match found for user ${uidKey}`);
+            matched = { id: uidKey, rec: u };
+            break;
+          }
+        }
+
+        const isAdmin = (m) => {
+          if (!m || !m.rec) {
+            console.log('🔍 DEBUG: isAdmin - no match or record');
+            return false;
+          }
+          const r = m.rec.RoleID || m.rec.RoleId || m.rec.roleId || m.rec.role || m.rec.Role;
+          if (!r) {
+            console.log('🔍 DEBUG: isAdmin - no RoleID found in record:', m.rec);
+            return false;
+          }
+          
+          // Check as number or string
+          const roleNum = Number(r);
+          const roleStr = String(r).toLowerCase();
+          
+          console.log(`🔍 DEBUG: isAdmin check - RoleID value: "${r}", type: ${typeof r}, as number: ${roleNum}, as string: "${roleStr}"`);
+          
+          const isAdminCheck = roleNum === 4 || roleStr === '4' || roleStr === 'admin';
+          console.log(`🔍 DEBUG: isAdmin result: ${isAdminCheck}`);
+          return isAdminCheck;
+        };
+
+        if (matched && isAdmin(matched)) {
+          console.log('✅ Admin user signed in via DB role lookup:', matched.id);
+          console.log('✅ Full user record:', matched.rec);
+          window.currentUser = user;
+          window.adminAllowed = true;
+          return;
+        }
+
+        // User is not an admin — deny access completely
+        console.warn('⛔ Non-admin account attempted admin sign-in');
+        console.warn('⛔ Matched user:', matched && matched.id);
+        console.warn('⛔ Matched record:', matched && matched.rec);
+        console.warn('⛔ Is admin check result:', matched ? isAdmin(matched) : 'no match');
+        try {
+          await signOut(auth);
+          window.currentUser = null;
+          window.adminAllowed = false;
+          if (window.showAlert) window.showAlert('Access denied. Only users with RoleID = 4 can access this admin dashboard.', 'error');
+          return;
+        } catch(e) {
+          console.warn('signOut failed', e);
+          window.currentUser = null;
+          window.adminAllowed = false;
+          if (window.showAlert) window.showAlert('Access denied. Only users with RoleID = 4 can access this admin dashboard.', 'error');
+          return;
+        }
+      } catch (err) {
+        console.error('Error during auth role enforcement:', err);
+        try { await signOut(auth); } catch(e) {}
+        window.currentUser = null;
+        window.adminAllowed = false;
       }
     });
 
@@ -164,7 +289,141 @@
     };
     
     const TricycleManagement = () => {
+      const createAuthUser = async (email, password) => {
+        try {
+          if (!email || !password) {
+            console.warn('createAuthUser: email or password missing', { email: !!email, password: !!password });
+            return null;
+          }
+          const key = window.firebaseApiKey;
+          if (!key) {
+            console.warn('Firebase API key not available; skipping Auth user creation');
+            return null;
+          }
+
+          // Try to create the account; if the email already exists, fall back to sign-in
+          const signUpUrl = `https://identitytoolkit.googleapis.com/v1/accounts:signUp?key=${encodeURIComponent(key)}`;
+          const signInUrl = `https://identitytoolkit.googleapis.com/v1/accounts:signInWithPassword?key=${encodeURIComponent(key)}`;
+
+          const body = JSON.stringify({ email: String(email), password: String(password), returnSecureToken: true });
+          console.log('createAuthUser: attempting signUp for email', email);
+          let res = await fetch(signUpUrl, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body });
+          let json = await res.json();
+          console.log('createAuthUser: signUp response status', res.status, 'body has error?', !!json?.error, 'localId?', !!json?.localId);
+          console.log('createAuthUser: full response:', JSON.stringify(json, null, 2));
+          if (!res.ok) {
+            // Interpret common Identity Toolkit errors to guide admin action
+            const errMsg = json && json.error && json.error.message ? json.error.message : null;
+            if (errMsg === 'OPERATION_NOT_ALLOWED') {
+              console.error('createAuthUser: Email/Password sign-up is disabled for this project (OPERATION_NOT_ALLOWED)');
+              if (window.showAlert) window.showAlert('Email/Password sign-up is disabled in Firebase Console. Enable the Email/Password provider under Authentication → Sign-in method.', 'error');
+              return null;
+            }
+            if (errMsg === 'WEAK_PASSWORD : Password should be at least 6 characters') {
+              if (window.showAlert) window.showAlert('Password is too weak. Use a stronger password (at least 6 characters).', 'error');
+              return null;
+            }
+
+            // If the email already exists, attempt sign-in to obtain localId
+            if (errMsg === 'EMAIL_EXISTS') {
+              try {
+                console.log('createAuthUser: email exists, attempting sign-in fallback');
+                const res2 = await fetch(signInUrl, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body });
+                const json2 = await res2.json();
+                if (res2.ok && json2 && json2.localId) {
+                  console.log('createAuthUser: sign-in fallback SUCCESS, UID =', json2.localId);
+                  return json2.localId;
+                }
+                console.warn('Sign-in fallback failed when email exists', json2);
+                return null;
+              } catch (e) {
+                console.warn('Sign-in fallback error', e);
+                return null;
+              }
+            }
+
+            console.warn('Auth signUp failed', json);
+            console.warn('Full error response:', JSON.stringify(json, null, 2));
+            if (window.showAlert) window.showAlert('Failed to create Auth user: ' + (errMsg || 'unknown error'), 'error');
+            return null;
+          }
+
+          // signUp succeeded; json.localId is the UID
+          if (json && json.localId) {
+            console.log('createAuthUser SUCCESS: new UID =', json.localId);
+            return json.localId;
+          }
+          console.warn('createAuthUser: signUp ok but no localId in response', json);
+          return null;
+        } catch (e) {
+          console.error('createAuthUser error', e);
+          return null;
+        }
+      };
+
+      // Ensure a Firebase Auth user exists for a DB user record.
+      // Reads `users/<id>` and if `Email`+`Password` are present and `AuthUID` is missing,
+      // creates the Auth user via Identity Toolkit and writes back `AuthUID`.
+      const ensureAuthForUser = async (userId) => {
+        try {
+          if (!userId) {
+            console.warn('ensureAuthForUser: userId is empty/falsy');
+            return null;
+          }
+          console.log('ensureAuthForUser: checking user', userId);
+          const userRef = window.dbRef(window.db, `users/${userId}`);
+          const snap = await window.dbGet(userRef);
+          const userObj = snap && snap.exists() ? snap.val() : {};
+          console.log('ensureAuthForUser: user record read from DB:', userObj);
+          const email = userObj && (userObj.Email || userObj.email);
+          const password = userObj && (userObj.Password || userObj.password);
+          const existing = userObj && (userObj.AuthUID || userObj.authUid || userObj.authUID);
+          console.log('ensureAuthForUser: email present?', !!email, 'password present?', !!password, 'AuthUID existing?', !!existing);
+          if (!email || !password) {
+            console.warn('ensureAuthForUser: email or password missing, skipping Auth creation');
+            return null;
+          }
+          if (existing) {
+            console.log('ensureAuthForUser: AuthUID already exists:', existing);
+            return existing;
+          }
+          console.log('ensureAuthForUser: calling createAuthUser');
+          const uid = await createAuthUser(email, password);
+          if (uid) {
+            console.log('ensureAuthForUser: Auth user created with UID:', uid, '- writing to DB');
+            try {
+              await window.dbUpdate(userRef, { AuthUID: uid });
+              console.log('ensureAuthForUser: AuthUID written to DB successfully');
+            } catch(e) {
+              console.warn('ensureAuthForUser: Failed to write AuthUID to DB', e);
+            }
+            return uid;
+          } else {
+            console.warn('ensureAuthForUser: createAuthUser returned null/falsy');
+          }
+          return null;
+        } catch (e) {
+          console.warn('ensureAuthForUser error', e);
+          return null;
+        }
+      };
       const [showModal, setShowModal] = React.useState(false);
+      // Force re-render when global auth flags change (window.currentUser / window.adminAllowed)
+      const [, setAuthTick] = React.useState(0);
+      const _lastAuth = React.useRef({ u: undefined, a: undefined });
+      React.useEffect(() => {
+        const id = setInterval(() => {
+          try {
+            const u = window.currentUser;
+            const a = window.adminAllowed;
+            if (u !== _lastAuth.current.u || a !== _lastAuth.current.a) {
+              _lastAuth.current = { u, a };
+              setAuthTick(t => t + 1);
+            }
+          } catch (e) {}
+        }, 250);
+        return () => clearInterval(id);
+      }, []);
       const [showAddDriverModal, setShowAddDriverModal] = React.useState(false);
       const [selected, setSelected] = React.useState(null);
       const [selectedIndex, setSelectedIndex] = React.useState(null);
@@ -259,6 +518,7 @@
             userId: userId,
             drvId: drvEntry ? drvEntry.id : null,
             name,
+            email: userRec.Email || userRec.email || '',
             contact,
             license,
             plate,
@@ -287,6 +547,7 @@
             id: `drv-${drvId}`,
             drvId,
             userId: drv.UserID || null,
+            email: drv.Email || drv.email || '',
             name,
             contact,
             license,
@@ -392,6 +653,7 @@
               if (userRec) {
                 base.contact = stripPhonePrefix(userRec.MobileNumber || base.contact || '');
                 base.name = [userRec.Firstname, userRec.Middlename, userRec.Lastname].filter(Boolean).join(' ') || base.name;
+                base.email = userRec.Email || userRec.email || '';
               }
               base.registeredDate = formatIsoForDisplay(drv.CreatedAt || drv.registeredDate || base.registeredDate || '');
             }
@@ -414,6 +676,7 @@
               if (userRec) {
                 base.contact = stripPhonePrefix(userRec.MobileNumber || base.contact || '');
                 base.name = [userRec.Firstname, userRec.Middlename, userRec.Lastname].filter(Boolean).join(' ') || base.name;
+                base.email = userRec.Email || userRec.email || '';
               }
               // format registeredDate for display
               base.registeredDate = formatIsoForDisplay(drv.CreatedAt || drv.registeredDate || base.registeredDate || '');
@@ -484,6 +747,10 @@
 
       const saveChanges = async () => {
         if (selectedIndex !== null && selected && selected.id) {
+          if (!window.adminAllowed) {
+            window.showAlert('Admin session unavailable. Sign in with an admin account or enable anonymous admin sign-in.', 'error');
+            return;
+          }
           // prefer ApplicationStatus field; fallback to legacy status
           const appStatus = (selected.ApplicationStatus || selected.Application_Status || selected.status || 'TO REVIEW').toString().toUpperCase();
           try { console.debug('saveChanges:', {
@@ -531,6 +798,7 @@
 
           const payload = {
             name: selected.name,
+            email: selected.email || '',
             contact: contactDigits.length === 11 ? '+63' + contactDigits : selected.contact,
             license: formattedLicense || selected.license || '',
             plate: selected.plate || '',
@@ -625,11 +893,13 @@
                       userObj.Middlename = nameParts.length > 2 ? nameParts.slice(1, -1).join(' ') : userObj.Middlename || '';
                     }
                     if (payload.contact) userObj.MobileNumber = payload.contact;
+                    if (payload.email) userObj.Email = payload.email;
                     // update password if admin edited it in modal
                     if (selected && (typeof selected.password !== 'undefined')) {
                       userObj.Password = selected.password || '';
                     }
                     await window.dbSet(userRef, userObj);
+                    try { await ensureAuthForUser(userId); } catch(e) { console.warn('ensureAuthForUser failed after driver edit dbSet', e); }
                   } catch (e) {
                     console.warn('Failed to update user record for driver edit', e);
                   }
@@ -699,6 +969,7 @@
           try {
             if (userIdVal && (typeof selected.password !== 'undefined')) {
               await window.dbUpdate(window.dbRef(window.db, `users/${userIdVal}`), { Password: selected.password || '' });
+              try { await ensureAuthForUser(userIdVal); } catch(e) { console.warn('ensureAuthForUser failed after password update (1)', e); }
             }
           } catch (e) {
             console.warn('Failed to update user password for application edit', e);
@@ -710,6 +981,7 @@
             try {
               if (userIdVal && (typeof selected.password !== 'undefined')) {
                 await window.dbUpdate(window.dbRef(window.db, `users/${userIdVal}`), { Password: selected.password || '' });
+                try { await ensureAuthForUser(userIdVal); } catch(e) { console.warn('ensureAuthForUser failed after password update (2)', e); }
               }
             } catch (e) { console.warn('Failed to update user password for applicant edit', e); }
 
@@ -760,7 +1032,11 @@
                     toUpd.Middlename = nameParts.length > 2 ? nameParts.slice(1, -1).join(' ') : '';
                   }
                   if (payload.contact) toUpd.MobileNumber = payload.contact;
-                  if (Object.keys(toUpd).length) await window.dbUpdate(userRef, toUpd);
+                  if (payload.email) toUpd.Email = payload.email;
+                  if (Object.keys(toUpd).length) {
+                    await window.dbUpdate(userRef, toUpd);
+                    try { await ensureAuthForUser(userIdVal); } catch(e) { console.warn('ensureAuthForUser failed after user update', e); }
+                  }
                 }
               } catch (e) { console.warn('Failed to update user info after driver change', e); }
 
@@ -875,6 +1151,10 @@
 
       const approveAndAdd = async () => {
         if (!selected || !selected.id) return;
+        if (!window.adminAllowed) {
+          window.showAlert('Admin session unavailable. Sign in with an admin account or enable anonymous admin sign-in.', 'error');
+          return;
+        }
         if (!window.db || !window.dbRef || !window.dbPush || !window.dbGet || !window.dbUpdate) {
           window.showAlert('Database helpers not available', 'error');
           return;
@@ -927,7 +1207,30 @@
 
           // userId is now a NUMBER from claimSmallestNumericId, use it directly
           const userRef = window.dbRef(window.db, `users/${userId}`);
+          console.log('approveAndAdd: writing new user to DB, userId =', userId, 'with email =', userPayload.Email, 'password =', userPayload.Password ? '***' : 'MISSING');
           await window.dbSet(userRef, userPayload);
+          console.log('approveAndAdd: user written to DB');
+
+          // Create Firebase Auth account immediately with the email/password we just wrote
+          // Do this in parallel with other operations (don't wait for DB propagation)
+          try {
+            console.log('approveAndAdd: creating Firebase Auth account for', userPayload.Email);
+            const authUid = await createAuthUser(userPayload.Email, userPayload.Password);
+            if (authUid) {
+              console.log('approveAndAdd: Auth account created successfully, UID =', authUid);
+              // Write the Auth UID back to the user record
+              try {
+                await window.dbUpdate(userRef, { AuthUID: authUid });
+                console.log('approveAndAdd: AuthUID persisted to user record');
+              } catch(e) {
+                console.warn('approveAndAdd: failed to persist AuthUID to DB', e);
+              }
+            } else {
+              console.warn('approveAndAdd: createAuthUser returned null/falsy');
+            }
+          } catch(e) {
+            console.warn('approveAndAdd: Auth account creation error', e);
+          }
 
           const driverId = await claimSmallestNumericId('drivers');
 
@@ -990,6 +1293,33 @@
         return "flex items-center gap-3 px-4 py-3 rounded-lg transition-colors " +
           (isActive ? "bg-yellow-500 text-gray-900 font-semibold" : "text-gray-300 hover:bg-gray-700");
       };
+
+      // If user is not authorized, show access denied message
+      if (!window.adminAllowed && window.currentUser !== undefined && window.currentUser === null) {
+        return (
+          <div className="flex min-h-screen bg-[#0a0e1a] items-center justify-center">
+            <div className="bg-[#1e2538] p-12 rounded-xl text-center max-w-md">
+              <h1 className="text-3xl font-bold text-red-500 mb-4">Access Denied</h1>
+              <p className="text-gray-300 mb-6">You do not have permission to access this admin dashboard.</p>
+              <p className="text-gray-400 text-sm mb-8">Only users with admin role (RoleID = 4) can access this page.</p>
+              <a href="log in.html" className="bg-yellow-500 hover:bg-yellow-600 text-white font-semibold py-2 px-6 rounded-lg transition">
+                Return to Login
+              </a>
+            </div>
+          </div>
+        );
+      }
+
+      // Show loading message while authentication is being checked
+      if (window.adminAllowed === false && window.currentUser === undefined) {
+        return (
+          <div className="flex min-h-screen bg-[#0a0e1a] items-center justify-center">
+            <div className="bg-[#1e2538] p-12 rounded-xl text-center">
+              <p className="text-gray-300">Verifying admin credentials...</p>
+            </div>
+          </div>
+        );
+      }
 
       return (
         <div className="flex min-h-screen bg-[#0a0e1a]">
@@ -1080,7 +1410,7 @@
                       <h3 className="text-2xl font-bold text-white">Add New Driver (Quick)</h3>
                       <button onClick={() => setShowAddDriverModal(false)} className="text-gray-400 hover:text-white text-2xl font-light">×</button>
                     </div>
-                    <AddSimpleDriverForm onClose={() => setShowAddDriverModal(false)} />
+                    <AddSimpleDriverForm onClose={() => setShowAddDriverModal(false)} ensureAuthForUser={ensureAuthForUser} />
                   </div>
                 </div>
               )}
@@ -1166,6 +1496,7 @@
                 {/* Inputs */}
                 <div className="grid grid-cols-2 gap-6 mb-8">
                   <Input label="Full Name" name="name" value={selected.name} onChange={handleInputChange} />
+                  <Input label="Email" name="email" value={selected.email || ''} onChange={handleInputChange} />
                   <div className="flex flex-col">
                     <label className="text-sm text-gray-300 mb-2 font-medium">Contact Number (11 digits)</label>
                     <div className="flex">
@@ -1343,7 +1674,7 @@
       </div>
     );
 
-    const AddSimpleDriverForm = ({ onClose }) => {
+    const AddSimpleDriverForm = ({ onClose, ensureAuthForUser }) => {
       const [name, setName] = React.useState('');
       const [email, setEmail] = React.useState('');
       const [contact, setContact] = React.useState('');
@@ -1441,6 +1772,10 @@
           window.showAlert('Database not available', 'error');
           return;
         }
+        if (!window.adminAllowed) {
+          window.showAlert('Admin session unavailable. Sign in with an admin account or enable anonymous admin sign-in.', 'error');
+          return;
+        }
         setIsSaving(true);
         try {
           // Use push() keys for quick-add to avoid creating allocations entries
@@ -1466,7 +1801,30 @@
           // userId is now a NUMBER from claimSmallestNumericId, use it directly
           const userId = await claimSmallestNumericId('users');
           const userRef = window.dbRef(window.db, `users/${userId}`);
+          console.log('AddSimpleDriverForm: writing new applicant to DB, userId =', userId, 'with email =', userObj.Email, 'password =', userObj.Password ? '***' : 'MISSING');
           await window.dbSet(userRef, userObj);
+          console.log('AddSimpleDriverForm: applicant written to DB');
+
+          // Create Firebase Auth account immediately with the email/password we just wrote
+          // Do this in parallel with other operations (don't wait for DB propagation)
+          try {
+            console.log('AddSimpleDriverForm: creating Firebase Auth account for', userObj.Email);
+            const authUid = await createAuthUser(userObj.Email, userObj.Password);
+            if (authUid) {
+              console.log('AddSimpleDriverForm: Auth account created successfully, UID =', authUid);
+              // Write the Auth UID back to the user record
+              try {
+                await window.dbUpdate(userRef, { AuthUID: authUid });
+                console.log('AddSimpleDriverForm: AuthUID persisted to user record');
+              } catch(e) {
+                console.warn('AddSimpleDriverForm: failed to persist AuthUID to DB', e);
+              }
+            } else {
+              console.warn('AddSimpleDriverForm: createAuthUser returned null/falsy');
+            }
+          } catch(e) {
+            console.warn('AddSimpleDriverForm: Auth account creation error', e);
+          }
 
           // Also create a drivers/ record for this applicant (IsApplying: true, ApplicationStatus: TO REVIEW)
           const driverId = await claimSmallestNumericId('drivers');

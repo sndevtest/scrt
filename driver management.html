@@ -1373,8 +1373,8 @@
                     </div>
                             <div className="flex flex-wrap gap-2 sm:gap-3 flex-shrink-0 mt-2 sm:mt-0 ml-0 sm:ml-4">
                               <div className="flex items-center gap-2">
-                                <span className={`px-3 h-8 flex items-center rounded-lg text-xs sm:text-sm font-bold ${driver.isActiveUser ? 'bg-blue-500 text-white' : 'bg-gray-500 text-white'}`}>{driver.isActiveUser ? 'Online' : 'Offline'}</span>
-                                <span className={`px-3 h-8 flex items-center rounded-lg text-xs sm:text-sm font-bold ${driver.status === 'Active' ? 'bg-green-500 text-white' : 'bg-gray-500 text-white'}`}>{driver.status === 'Active' ? 'ACTIVE' : 'INACTIVE'}</span>
+                                <span className={`px-3 h-8 flex items-center rounded-lg text-xs sm:text-sm font-bold ${driver.isActiveUser ? 'bg-blue-500 text-white' : 'bg-gray-500 text-white'}`}>{driver.isActiveUser ? 'Active' : 'Inactive'}</span>
+                                <span className={`px-3 h-8 flex items-center rounded-lg text-xs sm:text-sm font-bold ${driver.status === 'Active' ? 'bg-green-500 text-white' : 'bg-gray-500 text-white'}`}>{driver.status === 'Active' ? 'Online' : 'Offline'}</span>
                               </div>
                               <button onClick={() => handleEditDriver(index)} className="bg-yellow-500 hover:bg-yellow-600 px-3 sm:px-4 h-8 rounded-lg text-xs sm:text-sm font-semibold text-gray-900 flex items-center gap-2">
                         <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
