@@ -156,6 +156,141 @@
       return str;
     };
 
+    const ImportApprovedModal = ({ onClose, approvedApplications, drivers }) => {
+      const [importing, setImporting] = useState({});
+
+      const importApplication = async (appId) => {
+        if (importing[appId]) return;
+        setImporting(prev => ({ ...prev, [appId]: true }));
+        try {
+          const approvedApp = approvedApplications.find(a => a.id === appId);
+          if (!approvedApp) {
+            window.showAlert('Application/Driver not found', 'error');
+            return;
+          }
+
+          const name = approvedApp.Name || ([approvedApp.Firstname, approvedApp.Middlename, approvedApp.Lastname].filter(Boolean).join(' ')) || 'Unnamed';
+          const phone = (approvedApp.MobileNumber || approvedApp.Mobile || approvedApp.Contact || '').toString().replace(/\D/g, '').slice(0, 11);
+          const licenseRaw = approvedApp.LicenseNumber || approvedApp.license || approvedApp.License || '';
+          const license = formatLicense(licenseRaw);
+          if (!isValidLicense(license)) {
+            window.showAlert('Application has invalid license format: ' + (licenseRaw || ''), 'error');
+            return;
+          }
+
+          if (approvedApp._source === 'drivers') {
+            const userId = approvedApp.UserID;
+            try {
+              const userRef = window.dbRef(window.db, `users/${userId}`);
+              await window.dbUpdate(userRef, { IsActive: true, Status: 'Active' });
+              const driverRef = window.dbRef(window.db, `drivers/${appId}`);
+              await window.dbUpdate(driverRef, { Status: 'Active', ApplicationStatus: 'ADDED', IsApplying: false });
+            } catch(e) {}
+            window.showAlert(`${name} has been imported and added to Driver Management!`, 'success');
+            return;
+          }
+
+          const norm = normalizeLicenseForCompare(license);
+          const existsLicense = Object.values(rawDrivers || {}).some(d => normalizeLicenseForCompare(d.LicenseNumber || d.license || '') === norm);
+          if (existsLicense) {
+            window.showAlert('A driver with this license already exists in the system.', 'error');
+            return;
+          }
+
+          let userId = approvedApp.UserID;
+          if (!userId || !rawUsers[userId]) {
+            userId = await claimSmallestNumericId('users');
+            const nameParts = (name || '').trim().split(/\s+/);
+            const firstname = nameParts[0] || '';
+            const lastname = nameParts.length > 1 ? nameParts[nameParts.length - 1] : '';
+            const middlename = nameParts.length > 2 ? nameParts.slice(1, -1).join(' ') : '';
+            const userData = {
+              Firstname: firstname,
+              Middlename: middlename,
+              Lastname: lastname,
+              MobileNumber: phone,
+              CreatedAt: new Date().toISOString(),
+              Status: 'Active',
+              IsActive: true
+            };
+            await window.dbSet(window.dbRef(window.db, `users/${userId}`), userData);
+          }
+
+          const newDriverId = await claimSmallestNumericId('drivers');
+          const driverData = {
+            UserID: userId,
+            LicenseNumber: license,
+            TricyclePlateNumber: approvedApp.TricyclePlateNumber || approvedApp.TricycleNumber || approvedApp.tricycle || approvedApp.Tricycle || '',
+            TricycleNumber: approvedApp.TricycleNumber || approvedApp.tricycle || approvedApp.Tricycle || '',
+            Status: 'Active',
+            ApplicationStatus: 'ADDED',
+            IsApplying: false,
+            CreatedAt: new Date().toISOString()
+          };
+          await window.dbSet(window.dbRef(window.db, `drivers/${newDriverId}`), driverData);
+
+          // Link user to driver
+          try {
+            await window.dbUpdate(window.dbRef(window.db, `users/${userId}`), { DriverID: newDriverId });
+          } catch (e) {}
+
+          // Update application to link driver and mark as ADDED
+          try {
+            await window.dbUpdate(window.dbRef(window.db, `applications/${appId}`), { 
+              DriverID: newDriverId,
+              ApplicationStatus: 'APPROVED - ADDED',
+              ImportedAt: new Date().toISOString()
+            });
+          } catch (e) {}
+
+          window.showAlert(`Imported ${name || 'applicant'} as driver ID ${newDriverId}`, 'success');
+        } catch (err) {
+          console.error('Error importing application', err);
+          window.showAlert('Error importing application: ' + (err && err.message ? err.message : err), 'error');
+        } finally {
+          setImporting(prev => { const n = { ...prev }; n[appId] = false; return n; });
+        }
+      };
+
+      const importAll = async () => {
+        for (const app of approvedApplications || []) {
+          await importApplication(app.id);
+        }
+      };
+
+      return (
+        <div className="fixed inset-0 flex items-center justify-center bg-black bg-opacity-80 z-50 overflow-y-auto py-8">
+          <div className="bg-[#1e2538] p-6 rounded-xl w-full max-w-3xl max-h-[90vh] overflow-y-auto">
+            <div className="flex justify-between items-center mb-4">
+              <h2 className="text-2xl font-bold text-white">Driver Approved Applications</h2>
+              <div className="flex items-center gap-2">
+                <button onClick={importAll} className="bg-green-600 hover:bg-green-700 px-4 py-2 rounded text-white">Import All</button>
+                <button onClick={onClose} className="bg-red-600 hover:bg-red-700 px-4 py-2 rounded text-white">Close</button>
+              </div>
+            </div>
+            <p className="text-gray-300 text-sm mb-4">These are the applications that approved by TODA Officer and are not yet present in Driver Management.</p>
+            <div className="space-y-3">
+              {(approvedApplications && approvedApplications.length) ? approvedApplications.map((app) => (
+                <div key={app.id} className="flex justify-between items-center p-4 rounded-lg bg-[#252d42]">
+                  <div>
+                    <p className="font-bold text-white">{app.Name || [app.Firstname, app.Middlename, app.Lastname].filter(Boolean).join(' ') || app.ApplicantName || 'Unnamed'}</p>
+                    <p className="text-sm text-gray-400">License: {formatLicense(app.LicenseNumber || app.license || app.License || '')} | Phone: {stripPhonePrefix(app.MobileNumber || app.Mobile || app.Contact || '')}</p>
+                  </div>
+                  <div className="flex items-center gap-3">
+                    <button onClick={() => importApplication(app.id)} disabled={importing[app.id]} className={`px-4 py-2 rounded font-semibold ${importing[app.id] ? 'bg-gray-600 text-white cursor-not-allowed' : 'bg-yellow-500 text-gray-900 hover:bg-yellow-600'}`}>
+                      {importing[app.id] ? 'Importing…' : 'Import'}
+                    </button>
+                  </div>
+                </div>
+              )) : (
+                <p className="text-gray-400">No approved applications available for import.</p>
+              )}
+            </div>
+          </div>
+        </div>
+      );
+    };
+
     const AddDriverModal = ({ onClose, onSave }) => {
       const [newDriver, setNewDriver] = useState({
         name: "",
@@ -659,22 +794,102 @@
 
       const [rawUsers, setRawUsers] = useState({});
       const [rawDrivers, setRawDrivers] = useState({});
+      const [rawApplications, setRawApplications] = useState({});
       const [drivers, setDrivers] = useState([]);
+      const [showImportModal, setShowImportModal] = useState(false);
 
       useEffect(() => {
         if (!window.db || !window.dbRef || !window.dbOnValue) return;
 
         const usersRef = window.dbRef(window.db, 'users');
         const driversRef = window.dbRef(window.db, 'drivers');
+        const applicationsRef = window.dbRef(window.db, 'applications');
 
         const unsubUsers = window.dbOnValue(usersRef, snap => setRawUsers(snap.val() || {}));
         const unsubDrivers = window.dbOnValue(driversRef, snap => setRawDrivers(snap.val() || {}));
+        const unsubApplications = window.dbOnValue(applicationsRef, snap => setRawApplications(snap.val() || {}));
 
         return () => {
           try { unsubUsers(); } catch(e) {}
           try { unsubDrivers(); } catch(e) {}
+          try { unsubApplications(); } catch(e) {}
         };
       }, []);
+
+      // Derived list: approved drivers/applications available for import (similar to Driver Management page)
+      const approvedApplications = (() => {
+        try {
+          const drvs = rawDrivers || {};
+          const allDriversFromDb = Object.entries(drvs).map(([id, d]) => {
+            if (!d || !d.UserID) return null;
+            const user = rawUsers && rawUsers[d.UserID];
+            if (!user || user.DeletedAt) return null;
+            const name = user ? [user.Firstname, user.Middlename, user.Lastname].filter(Boolean).join(' ') : 'Unnamed';
+            const phone = user ? user.MobileNumber : '';
+            const status = (d.ApplicationStatus || d.Status || '').toString().toUpperCase().trim();
+            return {
+              id,
+              UserID: d.UserID,
+              LicenseNumber: d.LicenseNumber || '',
+              TricycleNumber: d.TricycleNumber || d.TricyclePlateNumber || '',
+              TricyclePlateNumber: d.TricyclePlateNumber || d.TricycleNumber || '',
+              ApplicationStatus: status,
+              Name: name,
+              MobileNumber: phone,
+              Firstname: user ? user.Firstname : '',
+              Middlename: user ? user.Middlename : '',
+              Lastname: user ? user.Lastname : '',
+              _source: 'drivers',
+              _status: status
+            };
+          }).filter(Boolean);
+
+          const apps = rawApplications || {};
+          const appsArr = Object.entries(apps).map(([id, a]) => {
+            if (a.DriverID) return null;
+            const userId = a.UserID;
+            const user = userId && rawUsers && rawUsers[userId];
+            if (!user || user.DeletedAt) return null;
+            const name = user ? [user.Firstname, user.Middlename, user.Lastname].filter(Boolean).join(' ') : (a.Name || a.ApplicantName || 'Unnamed');
+            const phone = user ? user.MobileNumber : (a.MobileNumber || a.Contact || a.Mobile || '');
+            const status = (a.ApplicationStatus || a.Status || '').toString().toUpperCase().trim();
+            return {
+              id,
+              ...a,
+              Name: name,
+              Firstname: user ? user.Firstname : a.Firstname,
+              Middlename: user ? user.Middlename : a.Middlename,
+              Lastname: user ? user.Lastname : a.Lastname,
+              MobileNumber: phone,
+              UserID: userId,
+              _source: 'applications',
+              _status: status
+            };
+          }).filter(Boolean);
+
+          const allApproved = [...allDriversFromDb, ...appsArr].filter(a => {
+            const status = a._status || '';
+            return status.includes('APPROVED');
+          });
+
+          const filtered = allApproved.filter(a => {
+            const alreadyExists = drivers.some(d => {
+              if (a.LicenseNumber) {
+                const match = normalizeLicenseForCompare(d.license) === normalizeLicenseForCompare(a.LicenseNumber);
+                if (match) return true;
+              }
+              if (a.UserID) {
+                const match = d.userId === a.UserID;
+                if (match) return true;
+              }
+              return false;
+            });
+            return !alreadyExists;
+          });
+
+          return filtered;
+        } catch (e) { return []; }
+      })();
 
       useEffect(() => {
         const makeFullName = (u) => {
@@ -816,6 +1031,11 @@
           const driverRef = window.dbRef(window.db, `drivers/${newDriverId}`);
           await window.dbSet(driverRef, driverData);
 
+          // Link the created driver id back to the user record so other pages can find the mapping
+          try {
+            await window.dbUpdate(window.dbRef(window.db, `users/${newUserId}`), { DriverID: newDriverId });
+          } catch (e) { /* non-fatal */ }
+
           setShowAddModal(false);
           window.showAlert(`Driver ${newDriver.name} added successfully (ID: ${newDriverId}) to Firebase!`, 'success');
         } catch (error) {
@@ -914,16 +1134,16 @@
                       <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                         <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 10v6m0 0l-3-3m3 3l3-3m2 8H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
                       </svg>
-                      Export
+                      EXPORT DATA
                     </button>
                     <button 
-                      onClick={() => setShowAddModal(true)}
+                      onClick={() => setShowImportModal(true)}
                       className="bg-yellow-500 hover:bg-yellow-600 px-4 py-2 rounded-lg text-gray-900 font-semibold flex items-center gap-2"
                     >
                       <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                         <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 4v16m8-8H4" />
                       </svg>
-                      Add Driver
+                      ADD APPROVED DRIVERS
                     </button>
                   </div>
                 </div>
@@ -981,6 +1201,7 @@
           {showAddModal && (
             <AddDriverModal onClose={() => setShowAddModal(false)} onSave={handleAddNewDriver} />
           )}
+          {showImportModal && <ImportApprovedModal onClose={() => setShowImportModal(false)} approvedApplications={approvedApplications} drivers={drivers} />}
           {selectedDriver && (
             <EditDriverModal 
               driver={selectedDriver} 
