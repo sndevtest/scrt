@@ -282,9 +282,9 @@
         console.log(`🔍 Role comparison - userRoleID: "${userRoleID}" (${typeof userRoleID}), ADMIN: "${ROLE_IDS.ADMIN}" (${typeof ROLE_IDS.ADMIN}), TODA_OFFICER: "${ROLE_IDS.TODA_OFFICER}" (${typeof ROLE_IDS.TODA_OFFICER})`);
         
         if (String(userRoleID) === String(ROLE_IDS.ADMIN)) {
-          // Admin goes to Driver Application page
-          console.log('🔔 Redirecting to Driver Application...');
-          window.location.href = 'Driver application.html';
+          // Admin goes to main admin dashboard
+          console.log('🔔 Redirecting to Admin Dashboard...');
+          window.location.href = 'dashboard.html';
         } else if (String(userRoleID) === String(ROLE_IDS.TODA_OFFICER)) {
           // TODA Officer goes to TODA Officer dashboard
           console.log('🔔 Redirecting to TODA Officer Dashboard...');

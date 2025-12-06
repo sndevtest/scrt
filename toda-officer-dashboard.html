@@ -8,15 +8,19 @@
   <script type="module">
     import { initializeApp } from "https://www.gstatic.com/firebasejs/12.6.0/firebase-app.js";
     import { getAuth, signOut } from "https://www.gstatic.com/firebasejs/12.6.0/firebase-auth.js";
-    import {
-      getDatabase,
+    import { getDatabase,
       ref,
       onValue,
       get,
+      set,
+      update,
+      push,
+      runTransaction,
       query,
       orderByChild,
       equalTo
     } from "https://www.gstatic.com/firebasejs/12.6.0/firebase-database.js";
+    import { getStorage, ref as storageRef, uploadBytes, getBytes, list, listAll, getMetadata } from "https://www.gstatic.com/firebasejs/12.6.0/firebase-storage.js";
 
     const firebaseConfig = {
       apiKey: "AIzaSyBS-g5bFBaJ6a35hWmjvoN-s8FuMEuxtew",
@@ -29,19 +33,34 @@
       measurementId: "G-2VWQ0C8EZE"
     };
 
+    // expose API key for metadata REST fallback
+    window.firebaseApiKey = firebaseConfig.apiKey;
+
     // Initialize Firebase
     const app = initializeApp(firebaseConfig);
     const auth = getAuth(app);
     const db = getDatabase(app);
 
-    // Expose DB helpers to the non-module React script
+    // Expose DB & Storage helpers to the non-module React script
+    const storage = getStorage ? getStorage(app) : null;
     window.db = db;
     window.dbRef = ref;
     window.dbOnValue = onValue;
     window.dbGet = get;
+    window.dbSet = set;
+    window.dbUpdate = update;
+    window.dbPush = push;
+    window.dbRunTransaction = runTransaction;
     window.dbQuery = query;
     window.dbOrderByChild = orderByChild;
     window.dbEqualTo = equalTo;
+    window.storage = storage;
+    window.storageRef = storageRef;
+    window.uploadBytes = uploadBytes;
+    window.getBytes = getBytes;
+    window.storageList = list;
+    window.storageListAll = listAll;
+    window.getMetadata = getMetadata;
     window.firebaseAuth = auth;
     window.firebaseSignOut = signOut;
 
@@ -56,10 +75,14 @@
         return;
       }
       console.log('✅ TODA Officer access granted');
+      // Grant admin-like privileges for TODA Officer flows in this dashboard
+      window.adminAllowed = true;
     };
 
     checkAccess();
   </script>
+
+  <script src="ui-modals.js"></script>
 
   <!-- React + Babel + Tailwind -->
   <script crossorigin src="https://unpkg.com/react@18/umd/react.development.js"></script>
@@ -104,6 +127,120 @@
   <div id="root"></div>
 
   <script type="text/babel">
+    // Helper: claim smallest available numeric id atomically (reuses gaps)
+    const claimSmallestNumericId = async (baseNode) => {
+      if (!window.dbGet || !window.dbRef || !window.dbRunTransaction) throw new Error('DB helpers missing');
+      const nodeRef = window.dbRef(window.db, baseNode);
+      const snap = await window.dbGet(nodeRef);
+      const keys = snap && snap.val() ? Object.keys(snap.val()) : [];
+      const numericKeys = keys.map(k => parseInt(k, 10)).filter(n => Number.isInteger(n) && n > 0);
+      const max = numericKeys.length ? Math.max(...numericKeys) : 0;
+
+      for (let candidate = 1; candidate <= max; candidate++) {
+        if (!numericKeys.includes(candidate)) {
+          const allocRef = window.dbRef(window.db, `allocations/${baseNode}/${candidate}`);
+          try {
+            const tx = await window.dbRunTransaction(allocRef, (current) => {
+              if (current) return;
+              return { reservedAt: Date.now() };
+            });
+            if (tx && tx.committed) return candidate;
+          } catch(e) {}
+        }
+      }
+
+      const newId = max + 1;
+      const allocRef2 = window.dbRef(window.db, `allocations/${baseNode}/${newId}`);
+      await window.dbRunTransaction(allocRef2, (current) => {
+        if (current) return;
+        return { reservedAt: Date.now() };
+      });
+      return newId;
+    };
+
+    // Helper: create Firebase Auth account
+    const createAuthUser = async (email, password) => {
+      try {
+        if (!email || !password) {
+          console.warn('createAuthUser: email or password missing');
+          return null;
+        }
+        const key = 'AIzaSyBS-g5bFBaJ6a35hWmjvoN-s8FuMEuxtew'; // firebaseApiKey
+        if (!key) {
+          console.warn('Firebase API key not available; skipping Auth user creation');
+          return null;
+        }
+
+        const signUpUrl = `https://identitytoolkit.googleapis.com/v1/accounts:signUp?key=${encodeURIComponent(key)}`;
+        const signInUrl = `https://identitytoolkit.googleapis.com/v1/accounts:signInWithPassword?key=${encodeURIComponent(key)}`;
+
+        const body = JSON.stringify({ email: String(email), password: String(password), returnSecureToken: true });
+        console.log('createAuthUser: attempting signUp for email', email);
+        let res = await fetch(signUpUrl, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body });
+        let json = await res.json();
+        console.log('createAuthUser: signUp response status', res.status);
+
+        if (!res.ok) {
+          const errMsg = json && json.error && json.error.message ? json.error.message : null;
+          if (errMsg === 'EMAIL_EXISTS') {
+            try {
+              const res2 = await fetch(signInUrl, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body });
+              const json2 = await res2.json();
+              if (res2.ok && json2 && json2.localId) {
+                console.log('createAuthUser: sign-in fallback SUCCESS');
+                return json2.localId;
+              }
+              return null;
+            } catch (e) {
+              console.warn('Sign-in fallback error', e);
+              return null;
+            }
+          }
+          console.warn('Auth signUp failed', json);
+          return null;
+        }
+
+        if (json && json.localId) {
+          console.log('createAuthUser SUCCESS: new UID =', json.localId);
+          return json.localId;
+        }
+        return null;
+      } catch (e) {
+        console.error('createAuthUser error', e);
+        return null;
+      }
+    };
+
+    // Helper: ensure Firebase Auth user exists
+    const ensureAuthForUser = async (userId) => {
+      try {
+        if (!userId) return null;
+        const userRef = window.dbRef(window.db, `users/${userId}`);
+        const snap = await window.dbGet(userRef);
+        const userObj = snap && snap.exists() ? snap.val() : {};
+        const email = userObj && (userObj.Email || userObj.email);
+        const password = userObj && (userObj.Password || userObj.password);
+        const existing = userObj && (userObj.AuthUID || userObj.authUid);
+
+        if (!email || !password) return null;
+        if (existing) return existing;
+
+        const uid = await createAuthUser(email, password);
+        if (uid) {
+          try {
+            await window.dbUpdate(userRef, { AuthUID: uid });
+          } catch(e) {
+            console.warn('Failed to write AuthUID to DB', e);
+          }
+          return uid;
+        }
+        return null;
+      } catch (e) {
+        console.warn('ensureAuthForUser error', e);
+        return null;
+      }
+    };
+
     const TodaOfficerDashboard = () => {
       const [currentPage, setCurrentPage] = React.useState('membership');
       const [userName, setUserName] = React.useState('');
@@ -111,40 +248,760 @@
       const [auditLogs, setAuditLogs] = React.useState([]);
       const [searchTerm, setSearchTerm] = React.useState('');
 
+      // Modal & selection state for membership review
+      const [showModal, setShowModal] = React.useState(false);
+      const [selected, setSelected] = React.useState(null);
+      const [selectedIndex, setSelectedIndex] = React.useState(null);
+
+      const [selectedPasswordVisible, setSelectedPasswordVisible] = React.useState(false);
+      const handleInputChange = (e) => {
+        const { name, value } = e.target;
+        setSelected((prev) => ({ ...prev, [name]: value }));
+      };
+
+      // Add Applicant form state
+      const [showAddForm, setShowAddForm] = React.useState(false);
+      const [formData, setFormData] = React.useState({});
+      const [statusFilter, setStatusFilter] = React.useState('ALL');
+
+      // Helper: strip +63 prefix for display
+      const stripPhonePrefix = (phone) => {
+        if (!phone) return '';
+        const str = phone.toString();
+        if (str.startsWith('+63')) return str.slice(3);
+        return str;
+      };
+
+      // Helper: Detect file type from URL or filename
+      const getFileType = (url) => {
+        if (!url) return 'unknown';
+        const urlStr = String(url).toLowerCase();
+        if (urlStr.includes('.pdf') || urlStr.includes('pdf')) return 'pdf';
+        if (urlStr.includes('.png') || urlStr.includes('.jpg') || urlStr.includes('.jpeg') || urlStr.includes('.gif') || urlStr.includes('.webp')) return 'image';
+        if (urlStr.includes('.doc') || urlStr.includes('.docx')) return 'document';
+        return 'file';
+      };
+
+      // Helper: Get file name from URL (extract filename from path)
+      const getFileNameFromUrl = (url) => {
+        if (!url) return 'document';
+        try {
+          const urlObj = new URL(url);
+          const pathname = urlObj.pathname || '';
+          let filename = pathname.substring(pathname.lastIndexOf('/') + 1) || '';
+          filename = decodeURIComponent(filename);
+          if (filename.includes('/')) {
+            filename = filename.substring(filename.lastIndexOf('/') + 1);
+          }
+          return filename || 'document';
+        } catch (e) {
+          return 'document';
+        }
+      };
+
+      // Map driver document URL fields to document types (if drivers record present)
+      const getDocumentsFromDriver = (drv) => {
+        if (!drv) return {};
+        const docs = {};
+        if (drv.DriversLicenseUrl) docs.license = { documentType: 'license', downloadUrl: drv.DriversLicenseUrl, fileName: getFileNameFromUrl(drv.DriversLicenseUrl), fileType: getFileType(drv.DriversLicenseUrl), uploadedAt: drv.DriversLicenseUploadedAt || null };
+        if (drv.NbiClearanceUrl) docs.nbi = { documentType: 'nbi', downloadUrl: drv.NbiClearanceUrl, fileName: getFileNameFromUrl(drv.NbiClearanceUrl), fileType: getFileType(drv.NbiClearanceUrl), uploadedAt: drv.NbiClearanceUploadedAt || null };
+        if (drv.QcIdUrl) docs.qc = { documentType: 'qc', downloadUrl: drv.QcIdUrl, fileName: getFileNameFromUrl(drv.QcIdUrl), fileType: getFileType(drv.QcIdUrl), uploadedAt: drv.QcIdUploadedAt || null };
+        if (drv.DrugTestUrl) docs.drug = { documentType: 'drug', downloadUrl: drv.DrugTestUrl, fileName: getFileNameFromUrl(drv.DrugTestUrl), fileType: getFileType(drv.DrugTestUrl), uploadedAt: drv.DrugTestUploadedAt || null };
+        return docs;
+      };
+
+      // License formatting and validation helpers (copied from Driver application)
+      const formatLicense = (value) => {
+        if (!value) return '';
+        const up = value.toString().toUpperCase();
+        const raw = up.replace(/[^A-Z0-9]/g, '');
+        const p1 = raw.slice(0, 3);
+        const p2 = raw.slice(3, 5);
+        const p3 = raw.slice(5, 11);
+        let formatted = p1;
+        if (p2) formatted += '-' + p2;
+        if (p3) formatted += '-' + p3;
+        return formatted;
+      };
+
+      const isValidLicense = (value) => {
+        return /^[A-Z]\d{2}-\d{2}-\d{6}$/.test((value||'').toString());
+      };
+
+      const normalizeLicenseForCompare = (value) => {
+        return (value||'').toString().toUpperCase().replace(/[^A-Z0-9]/g, '');
+      };
+
+      // Convert displayed 'YYYY-MM-DD HH:MM:SS' back to ISO-like string
+      const displayToIso = (s) => {
+        if (!s) return '';
+        const m = s.toString().match(/^(\d{4}-\d{2}-\d{2})[ T](\d{2}:\d{2}:\d{2})$/);
+        if (m) return `${m[1]}T${m[2]}.000Z`;
+        return s;
+      };
+
+      // Open modal for membership review (copied from Driver application behavior)
+      const openModal = (index) => {
+        const mem = members[index] || {};
+        const base = {
+          ...mem,
+          plate: mem.plate || '',
+          tricycleNumber: mem.tricycleNumber || mem.TricycleNumber || '',
+          license: mem.license || mem.LicenseNumber || '',
+          name: mem.name || ((mem.Firstname || '') + ' ' + (mem.Lastname || '')).trim() || 'Applicant',
+          contact: mem.contact || mem.MobileNumber || '',
+          registeredDate: mem.registeredDate || mem.RegisteredDate || ''
+        };
+
+        // Ensure UserID is always captured when possible
+        if (!base.UserID) {
+          if (mem.userId) base.UserID = mem.userId || '';
+          else if (mem.id && typeof mem.id === 'string' && mem.id.startsWith('user-')) base.UserID = mem.id.replace(/^user-/, '');
+        }
+
+        // If this row maps to a driver record (drvId), prefer canonical driver/user values
+        try {
+          if (base.drvId) {
+            const drv = rawDrivers && rawDrivers[String(base.drvId)];
+            if (drv) {
+              base.UserID = drv.UserID || base.UserID || '';
+              base.license = drv.LicenseNumber || drv.license || base.license || '';
+              base.plate = drv.TricyclePlateNumber || base.plate || '';
+              base.tricycleNumber = drv.TricycleNumber || base.tricycleNumber || '';
+              base.franchiseExpiry = drv.FranchiseExpiry || base.franchiseExpiry || '';
+              const userRec = rawUsers && rawUsers[drv.UserID];
+              if (userRec) {
+                base.contact = stripPhonePrefix(userRec.MobileNumber || base.contact || '');
+                base.name = [userRec.Firstname, userRec.Middlename, userRec.Lastname].filter(Boolean).join(' ') || base.name;
+                base.email = userRec.Email || userRec.email || '';
+              }
+              base.registeredDate = formatIsoForDisplay(drv.CreatedAt || drv.registeredDate || base.registeredDate || '');
+            }
+          }
+        } catch (e) {}
+
+        // Also handle entries that are id like 'drv-<id>'
+        try {
+          if (mem.id && typeof mem.id === 'string' && mem.id.startsWith('drv-')) {
+            const drvId = mem.id.replace(/^drv-/, '');
+            const drv = rawDrivers && rawDrivers[String(drvId)];
+            if (drv) {
+              base.UserID = drv.UserID || base.UserID || '';
+              base.license = drv.LicenseNumber || drv.license || base.license || '';
+              base.plate = drv.TricyclePlateNumber || base.plate || '';
+              base.tricycleNumber = drv.TricycleNumber || base.tricycleNumber || '';
+              base.franchiseExpiry = drv.FranchiseExpiry || drv.franchiseExpiry || base.franchiseExpiry || '';
+              const userRec = rawUsers && rawUsers[drv.UserID];
+              if (userRec) {
+                base.contact = stripPhonePrefix(userRec.MobileNumber || base.contact || '');
+                base.name = [userRec.Firstname, userRec.Middlename, userRec.Lastname].filter(Boolean).join(' ') || base.name;
+                base.email = userRec.Email || userRec.email || '';
+              }
+              base.registeredDate = formatIsoForDisplay(drv.CreatedAt || drv.registeredDate || base.registeredDate || '');
+            }
+          }
+        } catch (e) {}
+
+        // ApplicationStatus is stored in drivers/ when present; otherwise default to TO REVIEW
+        try {
+          if (base.drvId) {
+            const drv = rawDrivers && rawDrivers[String(base.drvId)];
+            base.ApplicationStatus = (drv && (drv.ApplicationStatus || drv.Status) ? (drv.ApplicationStatus || drv.Status) : 'TO REVIEW').toString().toUpperCase();
+          } else {
+            base.ApplicationStatus = (base.status || 'TO REVIEW').toString().toUpperCase();
+          }
+        } catch (e) { base.ApplicationStatus = 'TO REVIEW'; }
+
+        try { base.displayStatus = base.ApplicationStatus || 'TO REVIEW'; } catch (e) { base.displayStatus = base.ApplicationStatus || 'TO REVIEW'; }
+
+        // Load documents from drivers record (documents node and URL fields)
+        try {
+          if (base.drvId && rawDrivers && rawDrivers[String(base.drvId)]) {
+            const drv = rawDrivers[String(base.drvId)];
+            let docs = {};
+            if (drv.documents) docs = { ...drv.documents };
+            const docsFromUrls = getDocumentsFromDriver(drv);
+            docs = { ...docs, ...docsFromUrls };
+            base.documents = docs;
+          } else {
+            base.documents = {};
+          }
+        } catch (e) { base.documents = {}; }
+
+        // include password for editing when user record exists
+        try {
+          if (base.UserID && rawUsers && rawUsers[base.UserID]) {
+            base.password = rawUsers[base.UserID].Password || rawUsers[base.UserID].password || '';
+          }
+        } catch (e) {}
+
+        setSelectedIndex(index);
+        setSelected(base);
+        setShowModal(true);
+      };
+
+      const closeModal = () => { setShowModal(false); setSelected(null); setSelectedIndex(null); };
+
+      // Save changes performed by TODA Officer (adopted from Driver application flow)
+      const saveChanges = async () => {
+        if (selectedIndex !== null && selected && selected.id) {
+          if (!window.adminAllowed) {
+            window.showAlert('Admin session unavailable. Sign in with an admin account or enable anonymous admin sign-in.', 'error');
+            return;
+          }
+          const appStatus = (selected.ApplicationStatus || selected.Application_Status || selected.status || 'TO REVIEW').toString().toUpperCase();
+          try { console.debug('saveChanges:', { selectedApplicationStatus: selected.ApplicationStatus, selectedStatus: selected.status, appStatus: appStatus, allSelected: JSON.stringify(selected) }); } catch(e) {}
+
+          // Validate contact length (should be 11 digits - +63 prefix is added automatically)
+          const contactDigits = (selected.contact || '').toString().replace(/\D/g, '');
+          if (!contactDigits || contactDigits.length !== 11) {
+            window.showAlert('Phone number must be exactly 11 digits (format: +63 followed by 09XX XXXX XXX)', 'error');
+            return;
+          }
+
+          // Format license if present and validate
+          let formattedLicense = '';
+          if (selected.license) {
+            formattedLicense = formatLicense(selected.license);
+            if (!isValidLicense(formattedLicense)) {
+              window.showAlert('License number must match format like A01-23-456789', 'error');
+              return;
+            }
+            try {
+              const normNew = normalizeLicenseForCompare(formattedLicense);
+              const original = (members && members[selectedIndex] && (members[selectedIndex].license || members[selectedIndex].LicenseNumber || '')) || '';
+              const normOriginal = normalizeLicenseForCompare(original);
+              if (normNew && normNew !== normOriginal) {
+                for (const [k, d] of Object.entries(rawDrivers || {})) {
+                  if (!d) continue;
+                  const normExisting = normalizeLicenseForCompare(d.LicenseNumber || d.license || '');
+                  const isSameDriver = (selected.id && selected.id.startsWith('drv-') && selected.id.replace(/^drv-/, '') === k);
+                  if (normExisting && normExisting === normNew && !isSameDriver) {
+                    window.showAlert('License number already exists. Please use a unique license number.', 'error');
+                    return;
+                  }
+                }
+              }
+            } catch (e) {}
+          }
+
+          const payload = {
+            name: selected.name,
+            email: selected.email || '',
+            contact: contactDigits.length === 11 ? '+63' + contactDigits : selected.contact,
+            license: formattedLicense || selected.license || '',
+            plate: selected.plate || '',
+            tricycleNumber: selected.tricycleNumber || '',
+            registeredDate: displayToIso(selected.registeredDate) || selected.registeredDate || '',
+            franchiseExpiry: selected.franchiseExpiry || '',
+            ApplicationStatus: appStatus,
+            status: appStatus
+          };
+
+          // If this row was synthesized from a drivers/ record (id like 'drv-<id>'), persist the status back to drivers/<id>
+          if (typeof selected.id === 'string' && selected.id.startsWith('drv-')) {
+            const drvId = selected.id.replace(/^drv-/, '');
+            const drvRef = window.dbRef(window.db, `drivers/${drvId}`);
+            try {
+              let finalAppStatus = appStatus;
+              const drvRec = rawDrivers && rawDrivers[String(drvId)];
+              const linkedUserId = drvRec && drvRec.UserID;
+              try {
+                const scheck = (appStatus || '').toString().toUpperCase();
+                if (scheck.includes('APPROVED') && linkedUserId) {
+                  try {
+                    const userRefCheck = window.dbRef(window.db, `users/${linkedUserId}`);
+                    const userSnapCheck = await window.dbGet(userRefCheck);
+                    const userObjCheck = userSnapCheck.exists ? userSnapCheck.val() : userSnapCheck.val();
+                    if (userObjCheck && userObjCheck.Status) {
+                      finalAppStatus = 'ADDED';
+                    }
+                  } catch (e) { console.warn('Failed to check linked user Status for driver update', e); }
+                }
+              } catch(e) {}
+
+              const driverUpdatePayload = { ApplicationStatus: finalAppStatus };
+              if (payload.license) driverUpdatePayload.LicenseNumber = payload.license;
+              driverUpdatePayload.TricyclePlateNumber = payload.plate || '';
+              driverUpdatePayload.TricycleNumber = payload.tricycleNumber || '';
+              if (payload.franchiseExpiry) driverUpdatePayload.FranchiseExpiry = payload.franchiseExpiry;
+
+              try {
+                if (finalAppStatus === 'ADDED') {
+                  driverUpdatePayload.IsApplying = false;
+                } else if (typeof drvRec !== 'undefined' && typeof drvRec.IsApplying !== 'undefined') {
+                  driverUpdatePayload.IsApplying = drvRec.IsApplying;
+                } else {
+                  driverUpdatePayload.IsApplying = true;
+                }
+              } catch (e) { driverUpdatePayload.IsApplying = true; }
+
+              try { console.debug('Updating driver', drvId, 'with payload:', driverUpdatePayload); } catch(e) {}
+              await window.dbUpdate(drvRef, driverUpdatePayload);
+
+              try {
+                const drvRec = rawDrivers && rawDrivers[String(drvId)];
+                const userId = drvRec && drvRec.UserID;
+                if (userId) {
+                  try {
+                    const userRef = window.dbRef(window.db, `users/${userId}`);
+                    const userSnap = await window.dbGet(userRef);
+                    const userObj = userSnap.exists ? userSnap.val() : userSnap.val();
+                    const nameParts = (payload.name || '').trim().split(/\s+/).filter(Boolean);
+                    if (nameParts.length) {
+                      userObj.Firstname = nameParts[0] || userObj.Firstname || '';
+                      userObj.Lastname = nameParts.length > 1 ? nameParts[nameParts.length-1] : userObj.Lastname || '';
+                      userObj.Middlename = nameParts.length > 2 ? nameParts.slice(1, -1).join(' ') : userObj.Middlename || '';
+                    }
+                    if (payload.contact) userObj.MobileNumber = payload.contact;
+                    if (payload.email) userObj.Email = payload.email;
+                    if (selected && (typeof selected.password !== 'undefined')) {
+                      userObj.Password = selected.password || '';
+                    }
+                    await window.dbSet(userRef, userObj);
+                    try { await ensureAuthForUser(userId); } catch(e) { console.warn('ensureAuthForUser failed after driver edit dbSet', e); }
+                  } catch (e) { console.warn('Failed to update user record for driver edit', e); }
+
+                  const notifRef = window.dbRef(window.db, `users/${userId}/notifications/${Date.now()}`);
+                  await window.dbSet(notifRef, { type: 'APPLICATION_STATUS_UPDATE', message: `Your application status is now ${appStatus}`, createdAt: Date.now(), seen: false });
+                }
+              } catch (e) { console.warn('Failed to send notification to user for driver status change', e); }
+
+              try {
+                const updatedMembers = [...members];
+                let displayStatusAfter = appStatus;
+                updatedMembers[selectedIndex] = { ...updatedMembers[selectedIndex], ...payload, status: displayStatusAfter, color: getStatusColor(displayStatusAfter) };
+                setMembers(updatedMembers);
+
+                setRawDrivers(prev => {
+                  const copy = { ...(prev || {}) };
+                  copy[drvId] = { ...(copy[drvId] || {}), ...driverUpdatePayload };
+                  return copy;
+                });
+
+                try {
+                  const driversSnap = await window.dbGet(window.dbRef(window.db, 'drivers'));
+                  const drvVal = driversSnap.val() || {};
+                  setRawDrivers(drvVal);
+                } catch(e) { console.warn('Failed to refresh drivers after update', e); }
+              } catch (e) { console.warn('Error updating local state after driver update', e); }
+
+              window.showAlert("Application status saved for " + selected.name, 'success');
+              closeModal();
+            } catch (err) {
+              console.error('Error updating driver ApplicationStatus:', err);
+              window.showAlert('Error saving changes to driver: ' + (err.message || err), 'error');
+            }
+            return;
+          }
+
+          // Default: write to applications/<id> (legacy path) and also persist to users/drivers
+          try {
+            const appRef = window.dbRef(window.db, `applications/${selected.id}`);
+            const userIdVal = selected.UserID || (members && members[selectedIndex] && members[selectedIndex].UserID) || '';
+            const appPayload = {
+              UserID: userIdVal ? parseInt(userIdVal, 10) : null,
+              ApplicationStatus: appStatus,
+              LicenseNumber: formattedLicense || selected.license || '',
+              TricyclePlateNumber: selected.plate || '',
+              TricycleNumber: selected.tricycleNumber || ''
+            };
+
+            try {
+              if (userIdVal && (typeof selected.password !== 'undefined')) {
+                await window.dbUpdate(window.dbRef(window.db, `users/${userIdVal}`), { Password: selected.password || '' });
+                try { await ensureAuthForUser(userIdVal); } catch(e) { console.warn('ensureAuthForUser failed after password update (1)', e); }
+              }
+            } catch (e) { console.warn('Failed to update user password for application edit', e); }
+
+            try {
+              const userIdVal2 = selected.userId || (selected.id && selected.id.startsWith('user-') ? selected.id.replace(/^user-/, '') : selected.UserID || '');
+              try {
+                if (userIdVal2 && (typeof selected.password !== 'undefined')) {
+                  await window.dbUpdate(window.dbRef(window.db, `users/${userIdVal2}`), { Password: selected.password || '' });
+                  try { await ensureAuthForUser(userIdVal2); } catch(e) { console.warn('ensureAuthForUser failed after password update (2)', e); }
+                }
+              } catch (e) { console.warn('Failed to update user password for applicant edit', e); }
+
+              if (selected.drvId) {
+                const drvKey = selected.drvId;
+                let finalApp = appStatus;
+                try {
+                  const s2 = (appStatus || '').toString().toUpperCase();
+                  if (s2.includes('APPROVED') && userIdVal2) {
+                    try {
+                      const userRefCheck2 = window.dbRef(window.db, `users/${userIdVal2}`);
+                      const userSnapCheck2 = await window.dbGet(userRefCheck2);
+                      const userObjCheck2 = userSnapCheck2.exists ? userSnapCheck2.val() : userSnapCheck2.val();
+                      if (userObjCheck2 && userObjCheck2.Status) finalApp = 'ADDED';
+                    } catch (e) { console.warn('Failed to check user Status for applicant->driver update', e); }
+                  }
+                } catch (e) {}
+
+                const driverUpdate = { ApplicationStatus: finalApp };
+                driverUpdate.TricyclePlateNumber = payload.plate || '';
+                driverUpdate.TricycleNumber = payload.tricycleNumber || '';
+                if (payload.license) driverUpdate.LicenseNumber = payload.license;
+                if (payload.franchiseExpiry) driverUpdate.FranchiseExpiry = payload.franchiseExpiry;
+                try { driverUpdate.IsApplying = (finalApp === 'ADDED' ? false : true); } catch(e) { driverUpdate.IsApplying = true; }
+                await window.dbUpdate(window.dbRef(window.db, `drivers/${drvKey}`), driverUpdate);
+
+                try {
+                  if (userIdVal2) {
+                    const userRef = window.dbRef(window.db, `users/${userIdVal2}`);
+                    const nameParts = (payload.name || '').trim().split(/\s+/).filter(Boolean);
+                    const toUpd = {};
+                    if (nameParts.length) {
+                      toUpd.Firstname = nameParts[0] || '';
+                      toUpd.Lastname = nameParts.length > 1 ? nameParts[nameParts.length-1] : '';
+                      toUpd.Middlename = nameParts.length > 2 ? nameParts.slice(1, -1).join(' ') : '';
+                    }
+                    if (payload.contact) toUpd.MobileNumber = payload.contact;
+                    if (payload.email) toUpd.Email = payload.email;
+                    if (Object.keys(toUpd).length) {
+                      await window.dbUpdate(userRef, toUpd);
+                      try { await ensureAuthForUser(userIdVal2); } catch(e) { console.warn('ensureAuthForUser failed after user update', e); }
+                    }
+                  }
+                } catch (e) { console.warn('Failed to update user info after driver change', e); }
+
+                try { const notifRef = window.dbRef(window.db, `users/${userIdVal2}/notifications/${Date.now()}`); await window.dbSet(notifRef, { type: 'APPLICATION_STATUS_UPDATE', message: `Your application status is now ${appStatus}`, createdAt: Date.now(), seen: false }); } catch (e) { console.warn('Failed to notify user', e); }
+
+                try { const driversSnap = await window.dbGet(window.dbRef(window.db, 'drivers')); setRawDrivers(driversSnap.val() || {}); } catch(e) {}
+                try { const updatedMembers = [...members]; updatedMembers[selectedIndex] = { ...updatedMembers[selectedIndex], ...payload, status: appStatus, color: getStatusColor(appStatus) }; setMembers(updatedMembers); } catch (e) {}
+
+                window.showAlert('Changes saved for ' + selected.name, 'success');
+                closeModal();
+                return;
+              }
+
+              if (userIdVal2) {
+                try {
+                  const userRef = window.dbRef(window.db, `users/${userIdVal2}`);
+                  const nameParts = (payload.name || '').trim().split(/\s+/).filter(Boolean);
+                  const toUpd = {};
+                  if (nameParts.length) {
+                    toUpd.Firstname = nameParts[0] || '';
+                    toUpd.Lastname = nameParts.length > 1 ? nameParts[nameParts.length-1] : '';
+                    toUpd.Middlename = nameParts.length > 2 ? nameParts.slice(1, -1).join(' ') : '';
+                  }
+                  if (payload.contact) toUpd.MobileNumber = payload.contact;
+                  if (typeof selected.password !== 'undefined') toUpd.Password = selected.password || '';
+                  if (Object.keys(toUpd).length) await window.dbUpdate(userRef, toUpd);
+                } catch (e) { console.warn('Failed to update user record for applicant', e); }
+              }
+
+              if (payload.license || payload.plate || appStatus === 'APPROVED') {
+                try {
+                  const newDrvId = await claimSmallestNumericId('drivers');
+                  let finalApp = appStatus;
+                  try {
+                    const sCheck = (appStatus || '').toString().toUpperCase();
+                    if (sCheck.includes('APPROVED') && (userIdVal || userIdVal2)) {
+                      try {
+                        const userRefCheck3 = window.dbRef(window.db, `users/${userIdVal || userIdVal2}`);
+                        const userSnapCheck3 = await window.dbGet(userRefCheck3);
+                        const userObjCheck3 = userSnapCheck3.exists ? userSnapCheck3.val() : userSnapCheck3.val();
+                        if (userObjCheck3 && userObjCheck3.Status) finalApp = 'ADDED';
+                      } catch (e) { console.warn('Failed to check user Status when creating new driver', e); }
+                    }
+                  } catch (e) {}
+
+                  const drvPayload = {
+                    UserID: userIdVal || userIdVal2 || null,
+                    LicenseNumber: payload.license || '',
+                    TricyclePlateNumber: payload.plate || '',
+                    TricycleNumber: payload.tricycleNumber || payload.plate || '',
+                    FranchiseExpiry: payload.franchiseExpiry || '',
+                    IsApplying: finalApp === 'ADDED' ? false : true,
+                    ApplicationStatus: finalApp,
+                    CreatedAt: new Date().toISOString()
+                  };
+                  await window.dbSet(window.dbRef(window.db, `drivers/${newDrvId}`), drvPayload);
+                  if (userIdVal || userIdVal2) await window.dbUpdate(window.dbRef(window.db, `users/${userIdVal || userIdVal2}`), { DriverID: newDrvId, RoleID: 2 });
+                  try { const driversSnap = await window.dbGet(window.dbRef(window.db, 'drivers')); setRawDrivers(driversSnap.val() || {}); } catch(e) {}
+
+                  try {
+                    if (window.storage && window.storageRef && window.uploadBytes) {
+                      const nameParts = (payload.name || '').trim().split(/\s+/).filter(Boolean);
+                      const firstname = nameParts[0] || '';
+                      const lastname = nameParts.length > 1 ? nameParts[nameParts.length-1] : '';
+                      const folderName = `${firstname}_${lastname}_${newDrvId}`.replace(/\s+/g, '_').toUpperCase();
+                      const folderPath = `drivers/${folderName}/.folder`;
+                      const markerRef = window.storageRef(window.storage, folderPath);
+                      const markerContent = `Driver: ${payload.name}\nDriver ID: ${newDrvId}\nFolder: ${folderName}\nCreated: ${new Date().toISOString()}`;
+                      const markerBlob = new Blob([markerContent], { type: 'text/plain' });
+                      await window.uploadBytes(markerRef, markerBlob);
+                    }
+                  } catch (storageErr) { console.warn('Storage folder creation failed (non-critical)', storageErr); }
+
+                  window.showAlert('Applicant updated and driver record created', 'success');
+                  closeModal();
+                  return;
+                } catch (e) { console.error('Failed to create driver record', e); window.showAlert('Failed to create driver record', 'error'); }
+              }
+
+              window.showAlert('Changes saved for ' + selected.name, 'success');
+              closeModal();
+              return;
+            } catch (err) {
+              console.error('Error updating applicant:', err);
+              window.showAlert('Error saving changes: ' + (err.message || err), 'error');
+              return;
+            }
+          } catch (err) {
+            console.error('Unexpected error in saveChanges:', err);
+            window.showAlert('Error: ' + (err.message || err), 'error');
+            return;
+          }
+        }
+      };
+
+      // Approve and add (creates user and driver records if needed) - simplified from Admin flow
+      const approveAndAdd = async () => {
+        if (!selected || !selected.id) return;
+        if (!window.adminAllowed) {
+          window.showAlert('Admin session unavailable. Sign in with an admin account or enable anonymous admin sign-in.', 'error');
+          return;
+        }
+        if (!window.db || !window.dbRef || !window.dbPush || !window.dbGet || !window.dbUpdate) {
+          window.showAlert('Database helpers not available', 'error');
+          return;
+        }
+
+        setIsProcessing(true);
+        try {
+          if (!window.dbRunTransaction || !window.dbRef || !window.dbSet || !window.dbGet || !window.dbUpdate) {
+            throw new Error('Required DB helpers not available');
+          }
+
+          const normalize = (s) => (s||'').toString().toUpperCase().replace(/[^A-Z0-9]/g, '');
+          const licenseNorm = normalize(selected.license);
+
+          const driversSnap = await window.dbGet(window.dbRef(window.db, 'drivers'));
+          const driversVal = driversSnap.val() || {};
+          for (const [k, d] of Object.entries(driversVal)) {
+            const dLicense = normalize(d.LicenseNumber || d.license || '');
+            if (dLicense && dLicense === licenseNorm) {
+              window.showAlert('A driver with the same license already exists. Aborting add.', 'error');
+              setIsProcessing(false);
+              return;
+            }
+          }
+
+          const userId = await claimSmallestNumericId('users');
+
+          const fullName = (selected.name || '').trim();
+          const parts = fullName.split(' ').filter(Boolean);
+          const firstname = parts.shift() || fullName;
+          const lastname = parts.join('') || '';
+
+          const userPayload = {
+            Firstname: firstname,
+            Lastname: lastname,
+            MobileNumber: selected.contact || '',
+            Email: selected.email || '',
+            RoleID: 2,
+            Password: selected.password || '',
+            CreatedAt: new Date().toISOString(),
+            IsActive: false
+          };
+
+          const userRef = window.dbRef(window.db, `users/${userId}`);
+          await window.dbSet(userRef, userPayload);
+
+          try {
+            const authUid = await createAuthUser(userPayload.Email, userPayload.Password);
+            if (authUid) {
+              try { await window.dbUpdate(userRef, { AuthUID: authUid }); } catch(e) { console.warn('approveAndAdd: failed to persist AuthUID to DB', e); }
+            }
+          } catch(e) { console.warn('approveAndAdd: Auth account creation error', e); }
+
+          const driverId = await claimSmallestNumericId('drivers');
+
+          const driverPayload = {
+            UserID: userId,
+            LicenseNumber: selected.license || '',
+            TricyclePlateNumber: selected.plate || '',
+            TricycleNumber: selected.tricycleNumber || selected.plate || '',
+            ApplicationStatus: 'APPROVED',
+            CreatedAt: new Date().toISOString()
+          };
+
+          const driverRef = window.dbRef(window.db, `drivers/${driverId}`);
+          await window.dbSet(driverRef, driverPayload);
+
+          try { await window.dbUpdate(userRef, { DriverID: driverId, RoleID: 2 }); } catch (e) { console.warn('Failed to update user with DriverID/RoleID after adding driver', e); }
+
+          const payload = {
+            UserID: userId,
+            DriverID: driverId,
+            ApplicationStatus: 'APPROVED',
+            LicenseNumber: selected.license || '',
+            TricyclePlateNumber: selected.plate || '',
+            TricycleNumber: selected.tricycleNumber || selected.plate || '',
+            CreatedAt: new Date().toISOString()
+          };
+          const updatedMembers = [...members];
+          if (typeof selectedIndex === 'number' && updatedMembers[selectedIndex]) {
+            updatedMembers[selectedIndex] = { ...updatedMembers[selectedIndex], ...payload };
+            setMembers(updatedMembers);
+          }
+
+          window.showAlert('Applicant approved and added as driver', 'success');
+          closeModal();
+        } catch (err) {
+          console.error('Error approving and adding driver:', err);
+          window.showAlert('Error: ' + (err.message || err), 'error');
+        } finally {
+          setIsProcessing(false);
+        }
+      };
+
       // Load user info from sessionStorage
       React.useEffect(() => {
         const storedName = sessionStorage.getItem('userName') || 'TODA Officer';
         setUserName(storedName);
       }, []);
 
-      // Load members (users with RoleID = 2 or 3 - drivers and passengers)
+      // Raw drivers and users from DB (we'll merge them into a membership list)
+      const [rawDrivers, setRawDrivers] = React.useState({});
+      const [rawUsers, setRawUsers] = React.useState({});
+      const [isProcessing, setIsProcessing] = React.useState(false);
+      const [showAddApplicantModal, setShowAddApplicantModal] = React.useState(false);
+
+      // Helper function for status colors (matches Driver Application)
+      const getStatusColor = (status) => {
+        const statusStr = (status || '').toString().toUpperCase();
+        if (statusStr.includes('ADDED')) return 'bg-blue-600';
+        const baseStatus = statusStr.split(/[\s\-]/)[0];
+        switch(baseStatus) {
+          case 'TO': return 'bg-yellow-500';
+          case 'APPROVED': return 'bg-green-500';
+          case 'EXPIRED': return 'bg-red-500';
+          case 'REJECTED': return 'bg-red-500';
+          default: return 'bg-gray-500';
+        }
+      };
+
+      // Helper to format status for display
+      const formatStatusForDisplay = (appStatus) => {
+        const statusStr = (appStatus || '').toString().toUpperCase();
+        if (statusStr.includes('ADDED')) return 'ADDED';
+        const words = statusStr.split(/[\s\-]/).filter(Boolean);
+        if (words[0] === 'TO') return 'TO REVIEW';
+        return words[0] || 'TO REVIEW';
+      };
+
+      // Date formatting helper
+      const formatIsoForDisplay = (iso) => {
+        if (!iso) return '';
+        try {
+          const s = iso.toString();
+          let result = s.replace('T', ' ');
+          result = result.replace(/\.\d{3}Z?$/, '');
+          result = result.replace(/Z$/, '');
+          return result;
+        } catch (e) { return iso; }
+      };
+
+      // Subscribe to users and drivers and store raw snapshots
       React.useEffect(() => {
         if (!window.db || !window.dbRef || !window.dbOnValue) return;
-
+        const driversRef = window.dbRef(window.db, 'drivers');
         const usersRef = window.dbRef(window.db, 'users');
-        const unsubscribe = window.dbOnValue(usersRef, snap => {
-          try {
-            const usersData = snap.val() || {};
-            const memberList = Object.entries(usersData)
-              .filter(([_, user]) => {
-                const roleId = String(user?.RoleID || '');
-                return roleId === '2' || roleId === '3'; // Drivers and Passengers
-              })
-              .map(([userId, user]) => ({
-                id: userId,
-                ...user,
-                role: String(user?.RoleID) === '2' ? 'Driver' : 'Passenger'
-              }))
-              .sort((a, b) => (a.Firstname || '').localeCompare(b.Firstname || ''));
-            
-            setMembers(memberList);
-          } catch(err) {
-            console.error('Error loading members:', err);
-          }
-        });
-
-        return () => unsubscribe();
+        const unsubD = window.dbOnValue(driversRef, snap => setRawDrivers(snap.val() || {}));
+        const unsubU = window.dbOnValue(usersRef, snap => setRawUsers(snap.val() || {}));
+        return () => { try { unsubD(); } catch(e) {} try { unsubU(); } catch(e) {} };
       }, []);
+
+      // Recompute merged applicants list whenever users or drivers change
+      // Only drivers (RoleID === 2) are shown in membership; applicants are derived from users where RoleID === 2
+      React.useEffect(() => {
+        try { console.debug('Recomputing applicants from rawUsers/rawDrivers', Object.keys(rawUsers||{}).length, Object.keys(rawDrivers||{}).length); } catch(e) {}
+        const usersVal = rawUsers || {};
+        const items = [];
+
+        for (const [userId, userRec] of Object.entries(usersVal)) {
+          if (!userRec) continue;
+          // Only consider users with RoleID === 2 (driver role)
+          if (String(userRec.RoleID) !== '2') continue;
+          if (userRec.DeletedAt) continue;
+
+          // find driver record for this user (if any)
+          let drvEntry = null;
+          for (const [drvId, drv] of Object.entries(rawDrivers || {})) {
+            if (!drv) continue;
+            if (String(drv.UserID) === String(userId)) {
+              drvEntry = { id: drvId, rec: drv };
+              break;
+            }
+          }
+
+          const name = [userRec.Firstname, userRec.Middlename, userRec.Lastname].filter(Boolean).join(' ') || userRec.name || 'Applicant';
+          const contact = userRec.MobileNumber || userRec.contact || '';
+          const license = drvEntry ? (drvEntry.rec.LicenseNumber || drvEntry.rec.license || '') : '';
+          const plate = drvEntry ? (drvEntry.rec.TricyclePlateNumber || drvEntry.rec.TricycleNumber || '') : '';
+          const franchiseExpiry = drvEntry ? (drvEntry.rec.FranchiseExpiry || '') : '';
+          const appStatus = drvEntry ? (drvEntry.rec.ApplicationStatus || drvEntry.rec.Status || 'TO REVIEW') : 'TO REVIEW';
+
+          const statusRaw = (appStatus || 'TO REVIEW').toString();
+          const status = formatStatusForDisplay(appStatus);
+          const initials = (name || 'Applicant').split(' ').map(n => n[0]||'').join('').slice(0,2).toUpperCase();
+
+          items.push({
+            id: `user-${userId}`,
+            userId: userId,
+            drvId: drvEntry ? drvEntry.id : null,
+            name,
+            email: userRec.Email || userRec.email || '',
+            contact,
+            license,
+            plate,
+            status,
+            ApplicationStatus: appStatus,
+            Status: statusRaw,
+            registeredDate: formatIsoForDisplay(userRec.CreatedAt || ''),
+            franchiseExpiry,
+            initials,
+            color: getStatusColor(status),
+            files: drvEntry && drvEntry.rec.files ? drvEntry.rec.files : {}
+          });
+        }
+
+        // Also include any drivers that reference users not present (defensive)
+        for (const [drvId, drv] of Object.entries(rawDrivers || {})) {
+          if (!drv) continue;
+          if (drv.UserID && rawUsers && rawUsers[String(drv.UserID)]) continue; // already included
+          const name = drv.Name || drv.name || 'Applicant';
+          const contact = drv.MobileNumber || drv.contact || '';
+          const license = drv.LicenseNumber || drv.license || '';
+          const plate = drv.TricyclePlateNumber || drv.TricycleNumber || '';
+          const statusRaw = (drv.ApplicationStatus || drv.Status || 'TO REVIEW').toString();
+          const status = formatStatusForDisplay(drv.ApplicationStatus || drv.Status || 'TO REVIEW');
+          const initials = (name || 'Applicant').split(' ').map(n => n[0]||'').join('').slice(0,2).toUpperCase();
+          items.push({
+            id: `drv-${drvId}`,
+            drvId,
+            userId: drv.UserID || null,
+            email: drv.Email || drv.email || '',
+            name,
+            contact,
+            license,
+            plate,
+            status,
+            ApplicationStatus: drv.ApplicationStatus || drv.Status || 'TO REVIEW',
+            Status: statusRaw,
+            registeredDate: formatIsoForDisplay(drv.CreatedAt || ''),
+            franchiseExpiry: drv.FranchiseExpiry || '',
+            initials,
+            color: getStatusColor(status),
+            files: drv.files || {}
+          });
+        }
+
+        setMembers(items);
+      }, [rawDrivers, rawUsers]);
 
       // Load audit logs (simulated - in real scenario, this would come from a dedicated logs collection)
       React.useEffect(() => {
@@ -183,11 +1040,16 @@
       };
 
       const filteredMembers = members.filter(member => {
-        const searchLower = searchTerm.toLowerCase();
-        const fullName = `${member.Firstname || ''} ${member.Middlename || ''} ${member.Lastname || ''}`.toLowerCase();
-        return fullName.includes(searchLower) || 
-               (member.Email || '').toLowerCase().includes(searchLower) ||
-               (member.PhoneNumber || '').includes(searchTerm);
+        const searchLower = (searchTerm || '').toString().toLowerCase();
+        const fullName = (((member.Firstname && member.Lastname) ? (member.Firstname + ' ' + member.Lastname) : (member.name || ''))).toString().toLowerCase();
+        const matchesSearch = (searchLower === '') || fullName.includes(searchLower) || 
+               (member.email || member.Email || '').toString().toLowerCase().includes(searchLower) ||
+               (member.contact || member.PhoneNumber || '').toString().includes(searchTerm);
+
+        // Filter by status if not 'ALL' — use raw ApplicationStatus from DB when available
+        const matchesStatus = statusFilter === 'ALL' || ((member.ApplicationStatus || member.status || '').toString().toUpperCase() === statusFilter);
+
+        return matchesSearch && matchesStatus;
       });
 
       return (
@@ -256,82 +1118,278 @@
           <div className="max-w-7xl mx-auto px-6 py-8">
             {currentPage === 'membership' && (
               <div className="space-y-6">
-                <div>
-                  <h2 className="text-2xl font-bold text-white mb-4">Membership Management</h2>
-                  
-                  {/* Search */}
-                  <div className="mb-6">
-                    <input
-                      type="text"
-                      placeholder="Search by name, email, or phone..."
-                      value={searchTerm}
-                      onChange={(e) => setSearchTerm(e.target.value)}
-                      className="w-full px-4 py-2 bg-[#1a2333] text-white border border-gray-700 rounded-lg focus:outline-none focus:border-yellow-500"
-                    />
-                  </div>
+                <div className="flex justify-between items-center">
+                  <h2 className="text-2xl font-bold text-white">Driver Applicants</h2>
+                  <button 
+                    onClick={() => { setShowAddForm(true); setFormData({}); }}
+                    className="bg-yellow-500 hover:bg-yellow-600 px-4 py-2 rounded-lg text-gray-900 font-semibold flex items-center gap-2"
+                  >
+                    <span>+</span> Add Applicant
+                  </button>
+                </div>
 
-                  {/* Members Table */}
-                  <div className="overflow-x-auto">
-                    <table className="w-full text-sm">
-                      <thead className="bg-[#151b28] border-b border-gray-700">
-                        <tr>
-                          <th className="px-6 py-3 text-left text-gray-400 font-semibold">Name</th>
-                          <th className="px-6 py-3 text-left text-gray-400 font-semibold">Email</th>
-                          <th className="px-6 py-3 text-left text-gray-400 font-semibold">Phone</th>
-                          <th className="px-6 py-3 text-left text-gray-400 font-semibold">Role</th>
-                          <th className="px-6 py-3 text-left text-gray-400 font-semibold">Status</th>
-                        </tr>
-                      </thead>
-                      <tbody>
-                        {filteredMembers.length > 0 ? (
-                          filteredMembers.map((member) => (
-                            <tr key={member.id} className="bg-[#151b28] hover:bg-[#1a202e] border-b border-gray-700">
-                              <td className="px-6 py-3 text-gray-300">
-                                {member.Firstname} {member.Middlename} {member.Lastname}
-                              </td>
-                              <td className="px-6 py-3 text-gray-400">{member.Email || 'N/A'}</td>
-                              <td className="px-6 py-3 text-gray-400">
-                                {member.PhoneNumber ? 
-                                  (member.PhoneNumber.toString().startsWith('+63') 
-                                    ? member.PhoneNumber.toString().slice(3)
-                                    : member.PhoneNumber)
-                                  : 'N/A'}
-                              </td>
-                              <td className="px-6 py-3">
-                                <span className={`px-3 py-1 rounded-full text-xs font-medium ${
-                                  member.role === 'Driver'
-                                    ? 'bg-blue-900 text-blue-200'
-                                    : 'bg-purple-900 text-purple-200'
-                                }`}>
-                                  {member.role}
-                                </span>
-                              </td>
-                              <td className="px-6 py-3">
-                                <span className={`px-3 py-1 rounded-full text-xs font-medium ${
-                                  member.IsActive === true
-                                    ? 'bg-green-900 text-green-200'
-                                    : 'bg-red-900 text-red-200'
-                                }`}>
-                                  {member.IsActive === true ? 'Active' : 'Inactive'}
-                                </span>
-                              </td>
-                            </tr>
-                          ))
-                        ) : (
-                          <tr className="bg-[#151b28]">
-                            <td colSpan="5" className="px-6 py-8 text-center text-gray-400">
-                              No members found matching your search.
-                            </td>
-                          </tr>
-                        )}
-                      </tbody>
-                    </table>
+                {/* Status Filter + Total */}
+                <div className="flex items-center justify-between">
+                  <div className="flex gap-2">
+                    {['ALL', 'TO REVIEW', 'APPROVED', 'REJECTED', 'EXPIRED'].map(status => (
+                      <button
+                        key={status}
+                        onClick={() => setStatusFilter(status)}
+                        className={`px-4 py-2 rounded-lg text-sm font-medium transition ${
+                          statusFilter === status
+                            ? 'bg-yellow-500 text-gray-900'
+                            : 'bg-[#1a2333] text-gray-300 hover:bg-[#252d42]'
+                        }`}
+                      >
+                        {status}
+                      </button>
+                    ))}
                   </div>
-
-                  <div className="mt-4 text-gray-400 text-sm">
-                    Total members: <span className="text-yellow-500 font-bold">{filteredMembers.length}</span>
+                  <div className="text-gray-400 text-sm">
+                    Total applicants: <span className="text-yellow-500 font-bold">{filteredMembers.length}</span>
                   </div>
                 </div>
+
+                {/* Search */}
+                <div className="mb-6">
+                  <input
+                    type="text"
+                    placeholder="Search by name, email, or phone..."
+                    value={searchTerm}
+                    onChange={(e) => setSearchTerm(e.target.value)}
+                    className="w-full px-4 py-2 bg-[#1a2333] text-white border border-gray-700 rounded-lg focus:outline-none focus:border-yellow-500"
+                  />
+                </div>
+
+                {/* Applicants Grid */}
+                <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
+                  {filteredMembers.length > 0 ? (
+                    filteredMembers.map((applicant, idx) => {
+                      const firstName = applicant.Firstname || applicant.name?.split(' ')[0] || '';
+                      const lastName = applicant.Lastname || applicant.name?.split(' ').slice(1).join(' ') || '';
+                      const initials = (firstName[0] || '') + (lastName[0] || '');
+
+                      return (
+                        <div key={applicant.id} className="bg-[#1a2333] rounded-lg p-6 border border-gray-700 hover:border-yellow-500 transition">
+                          <div className="flex items-start justify-between mb-4">
+                            <div className="w-16 h-16 rounded-full bg-gradient-to-br from-yellow-400 to-yellow-600 flex items-center justify-center">
+                              <span className="text-2xl font-bold text-gray-900">{initials.toUpperCase()}</span>
+                            </div>
+                            <span className={`px-3 py-1 rounded-full text-xs font-medium ${
+                              applicant.ApplicationStatus === 'APPROVED' || applicant.ApplicationStatus === 'ACTIVE'
+                                ? 'bg-green-900 text-green-200'
+                                : applicant.ApplicationStatus === 'TO REVIEW'
+                                ? 'bg-blue-900 text-blue-200'
+                                : applicant.ApplicationStatus === 'REJECTED'
+                                ? 'bg-red-900 text-red-200'
+                                : 'bg-orange-900 text-orange-200'
+                            }`}>
+                              {applicant.ApplicationStatus || 'PENDING'}
+                            </span>
+                          </div>
+
+                          <h3 className="text-lg font-bold text-white mb-2">{firstName} {lastName}</h3>
+
+                          <div className="space-y-2 text-sm text-gray-400 mb-4">
+                            <div className="flex items-center gap-2">
+                              <span className="text-gray-500">📧</span>
+                              <span>{applicant.Email || applicant.email || 'N/A'}</span>
+                            </div>
+                            <div className="flex items-center gap-2">
+                              <span className="text-gray-500">📱</span>
+                              <span>{applicant.contact || 'N/A'}</span>
+                            </div>
+                            <div className="flex items-center gap-2">
+                              <span className="text-gray-500">🚗</span>
+                              <span>{applicant.tricycleNumber || applicant.plate || 'N/A'}</span>
+                            </div>
+                          </div>
+
+                          <button 
+                            onClick={() => openModal(idx)}
+                            className="w-full bg-yellow-500 hover:bg-yellow-600 px-3 py-2 rounded text-sm font-semibold text-gray-900 transition"
+                          >
+                            Edit Application
+                          </button>
+                        </div>
+                      );
+                    })
+                  ) : (
+                    <div className="col-span-full py-12 text-center">
+                      <p className="text-gray-400 mb-4">No applicants found matching your search.</p>
+                      <button 
+                        onClick={() => { setShowAddForm(true); setFormData({}); }}
+                        className="bg-yellow-500 hover:bg-yellow-600 px-4 py-2 rounded-lg text-gray-900 font-semibold"
+                      >
+                        Add First Applicant
+                      </button>
+                    </div>
+                  )}
+                </div>
+
+                {/* Modal copied from Driver application (full Applicant Review) */}
+                {showModal && selected && (
+                  <div className="fixed inset-0 bg-black bg-opacity-80 flex justify-center items-center z-50 overflow-y-auto py-8">
+                    <div className="bg-[#1e2538] p-8 rounded-xl w-[1000px] max-h-[90vh] overflow-y-auto">
+
+                      {/* Header */}
+                      <div className="flex justify-between items-center mb-6">
+                        <h3 className="text-2xl font-bold text-white">Applicant Review</h3>
+                        <button onClick={closeModal} className="text-gray-400 hover:text-white text-3xl font-light">
+                          &times;
+                        </button>
+                      </div>
+
+                      {/* Inputs */}
+                      <div className="grid grid-cols-2 gap-6 mb-8">
+                        <Input label="Full Name" name="name" value={selected.name} onChange={handleInputChange} />
+                        <Input label="Email" name="email" value={selected.email || ''} onChange={handleInputChange} />
+                        <div className="flex flex-col">
+                          <label className="text-sm text-gray-300 mb-2 font-medium">Contact Number (11 digits)</label>
+                          <div className="flex">
+                            <div className="inline-flex items-center px-3 rounded-l-lg bg-[#1b2333] text-white border border-r-0 border-gray-700">+63</div>
+                            <input
+                              name="contact"
+                              value={selected.contact || ''}
+                              onChange={(e) => {
+                                const raw = e.target.value.replace(/\D/g, '').slice(0,11);
+                                handleInputChange({ target: { name: 'contact', value: raw } });
+                              }}
+                              maxLength="11"
+                              placeholder="09123456789"
+                              className="w-full px-4 py-3 rounded-r-lg bg-[#252d42] text-white border border-gray-700 focus:border-yellow-500 focus:outline-none"
+                            />
+                          </div>
+                          <p className="text-xs text-gray-400 mt-1">Format: +63 followed by 11 digits</p>
+                        </div>
+                        <div className="flex flex-col">
+                          <label className="text-sm text-gray-300 mb-2 font-medium">Password</label>
+                          <div className="relative">
+                            <input
+                              name="password"
+                              type={selectedPasswordVisible ? 'text' : 'password'}
+                              value={selected.password || ''}
+                              onChange={(e) => handleInputChange({ target: { name: 'password', value: e.target.value } })}
+                              placeholder="Enter password (stored as plain text)"
+                              className="w-full px-4 py-3 rounded-lg bg-[#252d42] text-white border border-gray-700 focus:border-yellow-500 focus:outline-none"
+                            />
+                            <button
+                              type="button"
+                              onClick={() => setSelectedPasswordVisible(v => !v)}
+                              className="absolute right-2 top-1/2 -translate-y-1/2 text-gray-300 hover:text-white"
+                              aria-label="Toggle password visibility"
+                            >
+                              {selectedPasswordVisible ? (
+                                <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13.875 18.825A10.05 10.05 0 0112 19c-5.523 0-10-4.477-10-10 0-1.05.165-2.063.469-3.013M3 3l18 18"/></svg>
+                              ) : (
+                                <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 12a3 3 0 11-6 0 3 3 0 016 0z"/><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M2.458 12C3.732 7.943 7.523 5 12 5c4.477 0 8.268 2.943 9.542 7-1.274 4.057-5.065 7-9.542 7-4.477 0-8.268-2.943-9.542-7z"/></svg>
+                              )}
+                            </button>
+                          </div>
+                          <p className="text-xs text-gray-400 mt-1">Password is stored in users/&lt;id&gt;/Password as plain text.</p>
+                        </div>
+                        <div className="flex flex-col">
+                          <label className="text-sm text-gray-300 mb-2 font-medium">License Number</label>
+                          <input
+                            name="license"
+                            value={selected.license}
+                            onChange={(e) => {
+                              const raw = e.target.value.replace(/[^A-Za-z0-9\-]/g, '');
+                              handleInputChange({ target: { name: 'license', value: raw } });
+                            }}
+                            onBlur={() => {
+                              const formatted = formatLicense(selected.license);
+                              handleInputChange({ target: { name: 'license', value: formatted } });
+                            }}
+                            placeholder="e.g. A01-23-456789"
+                            className="px-4 py-3 rounded-lg bg-[#252d42] text-white border border-gray-700 focus:border-yellow-500 focus:outline-none"
+                          />
+                        </div>
+                        <div className="flex flex-col">
+                          <label className="text-sm text-gray-300 mb-2 font-medium">Registered Date</label>
+                          <input
+                            name="registeredDate"
+                            value={selected.registeredDate}
+                            onChange={handleInputChange}
+                            placeholder="YYYY-MM-DD HH:MM:SS"
+                            className="px-4 py-3 rounded-lg bg-[#252d42] text-white border border-gray-700 focus:border-yellow-500 focus:outline-none"
+                          />
+                        </div>
+                        <Input label="Tricycle Plate Number" name="plate" value={selected.plate} onChange={handleInputChange} />
+                        <Input label="Tricycle Number" name="tricycleNumber" value={selected.tricycleNumber} onChange={handleInputChange} />
+                        <Input label="Franchise Expiry" name="franchiseExpiry" value={selected.franchiseExpiry} onChange={handleInputChange} />
+
+                        <div>
+                          <div className="flex items-center gap-3">
+                            <label className="text-sm text-gray-300 font-medium whitespace-nowrap">Application Status</label>
+                            {selected && selected.displayStatus === 'ADDED' && (
+                              <span className="inline-flex items-center ml-2 px-2 py-0.5 text-xs font-semibold rounded bg-blue-600 text-white">
+                                Display: ADDED
+                              </span>
+                            )}
+                          </div>
+                          <select
+                            name="ApplicationStatus"
+                            value={selected.ApplicationStatus || selected.Application_Status || selected.status || 'TO REVIEW'}
+                            style={{ marginTop: '6px' }}
+                            onChange={handleInputChange}
+                            className="w-full px-4 py-3 rounded-lg bg-[#252d42] text-white border border-gray-700 focus:border-yellow-500 focus:outline-none"
+                          >
+                            <option value="TO REVIEW">To Review</option>
+                            <option value="APPROVED">Approved</option>
+                            <option value="REJECTED">Rejected</option>
+                            <option value="EXPIRED">Expired</option>
+                          </select>
+                        </div>
+                      </div>
+
+                      {/* FILE SUBMISSION TABLE */}
+                      <h4 className="text-xl font-bold mb-4 text-white">Submitted Documents</h4>
+
+                      <div className="overflow-x-auto mb-8">
+                        <table className="w-full border-collapse">
+                          <thead>
+                            <tr className="bg-[#252d42]">
+                              <th className="px-6 py-4 text-left text-white font-semibold">Requirement</th>
+                              <th className="px-6 py-4 text-left text-white font-semibold">Date Submitted</th>
+                              <th className="px-6 py-4 text-left text-white font-semibold">File</th>
+                            </tr>
+                          </thead>
+                          <tbody>
+                            <FileRow requirement="Driver's License" documentType="license" driverId={selected.drvId} doc={selected.documents?.license} missing={!selected.documents?.license} />
+                            <FileRow requirement="NBI Clearance" documentType="nbi" driverId={selected.drvId} doc={selected.documents?.nbi} missing={!selected.documents?.nbi} />
+                            <FileRow requirement="QC ID" documentType="qc" driverId={selected.drvId} doc={selected.documents?.qc} missing={!selected.documents?.qc} />
+                            <FileRow requirement="Drug Test Result" documentType="drug" driverId={selected.drvId} doc={selected.documents?.drug} missing={!selected.documents?.drug} />
+                          </tbody>
+                        </table>
+                      </div>
+
+                      {/* Action Buttons */}
+                      <div className="flex justify-between">
+                        <button onClick={closeModal} className="bg-red-600 hover:bg-red-700 px-8 py-3 rounded-lg font-semibold text-white">Cancel</button>
+                        <div className="flex items-center gap-3">
+                          <button onClick={saveChanges} className="bg-green-600 hover:bg-green-700 px-8 py-3 rounded-lg font-semibold text-white">Save Changes</button>
+                        </div>
+                      </div>
+
+                    </div>
+                  </div>
+                )}
+
+                {/* Add Applicant Form Modal */}
+                {showAddForm && (
+                  <div className="fixed inset-0 bg-black bg-opacity-80 flex justify-center items-center z-50">
+                    <div className="bg-[#1e2538] p-8 rounded-xl w-[520px]">
+                      <div className="flex justify-between items-center mb-4">
+                        <h3 className="text-2xl font-bold text-white">Add New Driver (Quick)</h3>
+                        <button onClick={() => setShowAddForm(false)} className="text-gray-400 hover:text-white text-2xl font-light">×</button>
+                      </div>
+                      <AddSimpleDriverForm onClose={() => setShowAddForm(false)} ensureAuthForUser={ensureAuthForUser} />
+                    </div>
+                  </div>
+                )}
+
+                
               </div>
             )}
 
@@ -386,6 +1444,461 @@
             )}
           </div>
         </div>
+      );
+    };
+
+    const AddSimpleDriverForm = ({ onClose, ensureAuthForUser }) => {
+      const [name, setName] = React.useState('');
+      const [email, setEmail] = React.useState('');
+      const [contact, setContact] = React.useState('');
+      const [password, setPassword] = React.useState('');
+      const [showPassword, setShowPassword] = React.useState(false);
+      const [nameError, setNameError] = React.useState('');
+      const [emailError, setEmailError] = React.useState('');
+      const [contactError, setContactError] = React.useState('');
+      const [isSaving, setIsSaving] = React.useState(false);
+
+      // Real-time validation for name field
+      const handleNameChange = (e) => {
+        const value = e.target.value.replace(/[^a-zA-Z\s\-']/g, '');
+        setName(value);
+        if (value && /\d/.test(value)) {
+          setNameError('Numbers are not allowed in name');
+        } else if (!value) {
+          setNameError('Full name is required');
+        } else {
+          setNameError('');
+        }
+      };
+
+      // Real-time validation for email field
+      const handleEmailChange = (e) => {
+        const value = e.target.value.trim().toLowerCase();
+        setEmail(value);
+        if (!value) {
+          setEmailError('Email is required');
+        } else {
+          let emailToCheck = value;
+          if (!emailToCheck.includes('@')) {
+            emailToCheck = emailToCheck + '@gmail.com';
+          }
+          const domain = emailToCheck.split('@')[1] || '';
+          if (domain !== 'gmail.com') {
+            setEmailError('Email must be a gmail.com address');
+          } else {
+            setEmailError('');
+          }
+        }
+      };
+
+      // Real-time validation for contact field
+      const handleContactChange = (e) => {
+        const value = e.target.value.replace(/\D/g, '').slice(0,11);
+        setContact(value);
+        if (value.length === 0) {
+          setContactError('Phone number is required');
+        } else if (value.length < 11) {
+          setContactError(`${11 - value.length} more digit${11 - value.length !== 1 ? 's' : ''} needed`);
+        } else if (value.length === 11) {
+          setContactError('');
+        }
+      };
+
+      const validate = () => {
+        let ok = true;
+        if (!name || /\d/.test(name)) { setNameError('Full name is required and cannot contain numbers'); ok = false; } else setNameError('');
+        let e = (email || '').toString().trim().toLowerCase();
+        if (!e) { setEmailError('Email is required'); ok = false; } else { if (!e.includes('@')) e = e + '@gmail.com'; const domain = e.split('@')[1] || ''; if (domain !== 'gmail.com') { setEmailError('Email must be a gmail.com address'); ok = false; } else setEmailError(''); }
+        const phoneRaw = (contact || '').toString().replace(/\D/g, '').slice(0,11);
+        if (phoneRaw.length !== 11) { setContactError('Phone number must be exactly 11 digits'); ok = false; } else setContactError('');
+        const fullPhone = '+63' + phoneRaw;
+        return { ok, emailPrepared: e, phoneRaw: fullPhone };
+      };
+
+      const handleSubmit = async () => {
+        const { ok, emailPrepared, phoneRaw } = validate();
+        if (!ok) return;
+        if (!window.db || !window.dbRef || !window.dbSet || !window.dbRunTransaction) {
+          window.showAlert('Database not available', 'error');
+          return;
+        }
+        setIsSaving(true);
+        try {
+          const parts = (name || '').trim().split(/\s+/).filter(Boolean);
+          const firstname = parts.shift() || name;
+          const lastname = parts.join('') || '';
+          const userObj = {
+            Firstname: firstname,
+            Middlename: '',
+            Lastname: lastname,
+            Email: emailPrepared,
+            MobileNumber: phoneRaw,
+            RoleID: 2,
+            Password: password || '',
+            CreatedAt: new Date().toISOString(),
+            IsActive: false
+          };
+          const userId = await claimSmallestNumericId('users');
+          const userRef = window.dbRef(window.db, `users/${userId}`);
+          console.log('AddSimpleDriverForm: writing new applicant to DB, userId =', userId);
+          await window.dbSet(userRef, userObj);
+          try {
+            console.log('AddSimpleDriverForm: creating Firebase Auth account for', userObj.Email);
+            const authUid = await createAuthUser(userObj.Email, userObj.Password);
+            if (authUid) {
+              try { await window.dbUpdate(userRef, { AuthUID: authUid }); } catch(e) { console.warn('AddSimpleDriverForm: failed to persist AuthUID', e); }
+            }
+          } catch(e) { console.warn('AddSimpleDriverForm: Auth account creation error', e); }
+
+          const driverId = await claimSmallestNumericId('drivers');
+          const driverRef = window.dbRef(window.db, `drivers/${driverId}`);
+          const driverObj = {
+            UserID: userId,
+            LicenseNumber: '',
+            TricyclePlateNumber: '',
+            TricycleNumber: '',
+            FranchiseExpiry: '',
+            IsApplying: true,
+            ApplicationStatus: 'TO REVIEW',
+            CreatedAt: new Date().toISOString()
+          };
+          await window.dbSet(driverRef, driverObj);
+
+          try {
+            if (window.storage && window.storageRef && window.uploadBytes) {
+              const folderName = `${firstname}_${lastname}_${driverId}`.replace(/\s+/g, '_').toUpperCase();
+              const folderPath = `drivers/${folderName}/.folder`;
+              const markerRef = window.storageRef(window.storage, folderPath);
+              const markerContent = `Driver: ${name}\nDriver ID: ${driverId}\nFolder: ${folderName}\nCreated: ${new Date().toISOString()}`;
+              const markerBlob = new Blob([markerContent], { type: 'text/plain' });
+              await window.uploadBytes(markerRef, markerBlob);
+            }
+          } catch (storageErr) {
+            console.warn('Storage folder creation failed (non-critical)', storageErr);
+          }
+
+          window.showAlert('Driver applicant added and marked as TO REVIEW. Storage folder created.', 'success');
+          onClose();
+        } catch (err) {
+          console.error('Error adding driver applicant', err);
+          window.showAlert('Error: ' + (err && err.message ? err.message : err), 'error');
+        } finally {
+          setIsSaving(false);
+        }
+      };
+
+      return (
+        <div className="space-y-4">
+          <div>
+            <label className="text-sm text-gray-300 mb-2 font-medium">Full Name</label>
+            <input 
+              value={name} 
+              onChange={handleNameChange} 
+              placeholder="Enter full name (letters, spaces, hyphens only)"
+              className={`w-full px-4 py-3 rounded-lg bg-[#252d42] text-white border ${nameError ? 'border-red-500' : 'border-gray-700'} focus:outline-none transition`}
+            />
+            {nameError && <p className="text-sm text-red-400 mt-1">{nameError}</p>}
+          </div>
+          <div>
+            <label className="text-sm text-gray-300 mb-2 font-medium">Email</label>
+            <input 
+              value={email} 
+              onChange={handleEmailChange} 
+              placeholder="example@gmail.com (gmail.com only)"
+              className={`w-full px-4 py-3 rounded-lg bg-[#252d42] text-white border ${emailError ? 'border-red-500' : 'border-gray-700'} focus:outline-none transition`}
+            />
+            {emailError && <p className="text-sm text-red-400 mt-1">{emailError}</p>}
+          </div>
+          <div>
+            <label className="text-sm text-gray-300 mb-2 font-medium">Contact Number (11 digits)</label>
+            <div className="flex">
+              <div className="inline-flex items-center px-3 rounded-l-lg bg-[#1b2333] text-white border border-r-0 border-gray-700">+63</div>
+              <input 
+                value={contact} 
+                onChange={handleContactChange} 
+                placeholder="09123456789" 
+                maxLength="11" 
+                className={`w-full px-4 py-3 rounded-r-lg bg-[#252d42] text-white border ${contactError ? 'border-red-500' : 'border-gray-700'} focus:outline-none transition`}
+              />
+            </div>
+            <p className="text-xs text-gray-400 mt-1">Format: +63 followed by 11 digits</p>
+            {contactError && <p className="text-sm text-red-400 mt-1">{contactError}</p>}
+          </div>
+          <div>
+            <label className="text-sm text-gray-300 mb-2 font-medium">Password</label>
+            <div className="relative">
+              <input
+                value={password}
+                onChange={(e) => setPassword(e.target.value)}
+                placeholder="Set a password (stored plain)"
+                type={showPassword ? 'text' : 'password'}
+                className="w-full px-4 py-3 rounded-lg bg-[#252d42] text-white border border-gray-700 focus:outline-none"
+              />
+              <button type="button" onClick={() => setShowPassword(v => !v)} className="absolute right-2 top-1/2 -translate-y-1/2 text-gray-300 hover:text-white">
+                {showPassword ? (
+                  <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13.875 18.825A10.05 10.05 0 0112 19c-5.523 0-10-4.477-10-10 0-1.05.165-2.063.469-3.013M3 3l18 18"/></svg>
+                ) : (
+                  <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 12a3 3 0 11-6 0 3 3 0 016 0z"/><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M2.458 12C3.732 7.943 7.523 5 12 5c4.477 0 8.268 2.943 9.542 7-1.274 4.057-5.065 7-9.542 7-4.477 0-8.268-2.943-9.542-7z"/></svg>
+                )}
+              </button>
+            </div>
+            <p className="text-xs text-gray-400 mt-1">Password will be written to `users/&lt;id&gt;/Password` as plain text.</p>
+          </div>
+          <div className="flex justify-end gap-3 mt-4">
+            <button onClick={onClose} className="bg-gray-600 hover:bg-gray-700 px-6 py-2 rounded text-white">Cancel</button>
+            <button onClick={handleSubmit} disabled={isSaving || nameError || emailError || contactError} className={`px-6 py-2 rounded font-semibold text-white ${isSaving || nameError || emailError || contactError ? 'bg-gray-600 cursor-not-allowed' : 'bg-yellow-500 hover:bg-yellow-600'}`}>
+              {isSaving ? 'Adding…' : 'Add Applicant'}
+            </button>
+          </div>
+        </div>
+      );
+    };
+
+    const Input = ({ label, name, value, onChange }) => (
+      <div className="flex flex-col">
+        <label className="text-sm text-gray-300 mb-2 font-medium">{label}</label>
+        <input
+          name={name}
+          value={value || ''}
+          onChange={onChange}
+          className="px-4 py-3 rounded-lg bg-[#252d42] text-white border border-gray-700 focus:border-yellow-500 focus:outline-none"
+        />
+      </div>
+    );
+
+    const FileRow = ({ requirement, documentType, driverId, doc, missing }) => {
+      const [modifiedDate, setModifiedDate] = React.useState('Fetching...');
+
+      React.useEffect(() => {
+        if (!doc || !doc.downloadUrl) return;
+
+        const fetchFileMetadata = async () => {
+          try {
+            const url = new URL(doc.downloadUrl);
+            const pathMatch = url.pathname.match(/\/o\/(.*?)(?:\?|$)/);
+            if (!pathMatch) {
+              setModifiedDate('N/A');
+              return;
+            }
+            const storagePath = decodeURIComponent(pathMatch[1]);
+            try {
+              if (window.getMetadata) {
+                const fileRef = window.storageRef(window.storage, storagePath);
+                const metadata = await window.getMetadata(fileRef);
+                if (metadata && metadata.timeCreated) {
+                  const uploadDate = new Date(metadata.timeCreated).toLocaleDateString();
+                  setModifiedDate(uploadDate);
+                } else if (metadata && metadata.updated) {
+                  const uploadDate = new Date(metadata.updated).toLocaleDateString();
+                  setModifiedDate(uploadDate);
+                } else {
+                  setModifiedDate('N/A');
+                }
+              } else {
+                const bucket = 'pasakay-project-ph.firebasestorage.app';
+                const metadataUrl = `https://www.googleapis.com/storage/v1/b/${bucket}/o/${encodeURIComponent(storagePath)}?alt=json&key=${window.firebaseApiKey}`;
+                const response = await fetch(metadataUrl);
+                if (!response.ok) { setModifiedDate('N/A'); return; }
+                const metadata = await response.json();
+                if (metadata && metadata.timeCreated) {
+                  const uploadDate = new Date(metadata.timeCreated).toLocaleDateString();
+                  setModifiedDate(uploadDate);
+                } else if (metadata && metadata.updated) {
+                  const uploadDate = new Date(metadata.updated).toLocaleDateString();
+                  setModifiedDate(uploadDate);
+                } else {
+                  setModifiedDate('N/A');
+                }
+              }
+            } catch (metadataErr) {
+              console.warn('Error fetching Firebase Storage metadata:', metadataErr);
+              setModifiedDate('N/A');
+            }
+          } catch (err) {
+            console.warn('Failed to parse file URL or fetch metadata:', err);
+            setModifiedDate('N/A');
+          }
+        };
+        fetchFileMetadata();
+      }, [doc]);
+
+      if (missing || !doc) {
+        return (
+          <tr className="bg-[#151b28] hover:bg-[#1a202e]">
+            <td className="px-6 py-4 text-gray-300 font-medium">{requirement}</td>
+            <td className="px-6 py-4 text-center" colSpan="2">
+              <div className="flex items-center justify-center gap-2">
+                <span className="bg-red-600 px-4 py-2 rounded-lg text-sm font-bold text-white">NOT SUBMITTED</span>
+              </div>
+            </td>
+          </tr>
+        );
+      }
+
+      const fileSize = doc.size ? (doc.size / 1024 / 1024).toFixed(2) + ' MB' : 'Unknown';
+      const fileType = doc.fileType || getFileType(doc.downloadUrl || doc.fileName || '');
+
+      const getFileIcon = () => {
+        switch(fileType) {
+          case 'pdf':
+            return (
+              <svg className="w-6 h-6 text-red-500" fill="currentColor" viewBox="0 0 20 20"><path d="M4 3a2 2 0 00-2 2v10a2 2 0 002 2h12a2 2 0 002-2V5a2 2 0 00-2-2H4zm9 8a1 1 0 11-2 0 1 1 0 012 0zm-4 2a1 1 0 100-2 1 1 0 000 2zm8-2a1 1 0 11-2 0 1 1 0 012 0z"/></svg>
+            );
+          case 'image':
+            return (
+              <svg className="w-6 h-6 text-blue-500" fill="currentColor" viewBox="0 0 20 20"><path fillRule="evenodd" d="M4 3a2 2 0 00-2 2v10a2 2 0 002 2h12a2 2 0 002-2V5a2 2 0 00-2-2H4zm12 12H4l4-8 3 6 2-4 3 6z" clipRule="evenodd"/></svg>
+            );
+          case 'document':
+            return (
+              <svg className="w-6 h-6 text-green-500" fill="currentColor" viewBox="0 0 20 20"><path d="M4 4a2 2 0 012-2h4.586A2 2 0 0112 2.586L15.414 6A2 2 0 0116 7.414V16a2 2 0 01-2 2H6a2 2 0 01-2-2V4z"/></svg>
+            );
+          default:
+            return (
+              <svg className="w-6 h-6 text-gray-400" fill="currentColor" viewBox="0 0 20 20"><path d="M4 4a2 2 0 012-2h4.586A2 2 0 0112 2.586L15.414 6A2 2 0 0116 7.414V16a2 2 0 01-2 2H6a2 2 0 01-2-2V4z"/></svg>
+            );
+        }
+      };
+
+      const displayName = doc.fileName || getFileNameFromUrl(doc.downloadUrl || '');
+
+      const showPreview = (url, type) => {
+        if (!url) return;
+        let modal = document.getElementById('file-preview-modal');
+        if (!modal) {
+          modal = document.createElement('div');
+          modal.id = 'file-preview-modal';
+          modal.style.position = 'fixed';
+          modal.style.inset = '0';
+          modal.style.display = 'flex';
+          modal.style.alignItems = 'center';
+          modal.style.justifyContent = 'center';
+          modal.style.background = 'rgba(0,0,0,0.6)';
+          modal.style.zIndex = 9999;
+          modal.innerHTML = `
+            <div id="file-preview-container" style="background:#0b1220;padding:12px;border-radius:8px;max-width:90%;max-height:90%;box-shadow:0 10px 30px rgba(0,0,0,0.6);width:90%;">
+              <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px;gap:12px;">
+                <div style="color:#fef3c7;font-weight:600;">Preview</div>
+                <div id="file-preview-controls" style="display:flex;align-items:center;gap:8px;margin-left:8px;">
+                  <button id="zoom-out" style="background:#1f2937;border:none;padding:6px 8px;color:#fef3c7;border-radius:6px;cursor:pointer;">-</button>
+                  <div id="zoom-level" style="color:#fef3c7;min-width:48px;text-align:center;">100%</div>
+                  <button id="zoom-in" style="background:#1f2937;border:none;padding:6px 8px;color:#fef3c7;border-radius:6px;cursor:pointer;">+</button>
+                  <button id="zoom-reset" style="background:#111827;border:none;padding:6px 8px;color:#fef3c7;border-radius:6px;cursor:pointer;">Reset</button>
+                </div>
+                <button id="file-preview-close" style="background:transparent;border:none;color:#fef3c7;font-size:18px;cursor:pointer;">✕</button>
+              </div>
+              <div id="file-preview-body" style="width:100%;height:80vh;display:flex;align-items:center;justify-content:center;overflow:hidden;position:relative;border-radius:6px;background:#000;"></div>
+            </div>
+          `;
+          document.body.appendChild(modal);
+          document.getElementById('file-preview-close').addEventListener('click', () => { modal.remove(); });
+          modal.addEventListener('click', (ev) => { if (ev.target === modal) modal.remove(); });
+        }
+
+        const body = modal.querySelector('#file-preview-body');
+        body.innerHTML = '';
+        modal._scale = modal._scale || 1;
+        modal._translateX = modal._translateX || 0;
+        modal._translateY = modal._translateY || 0;
+        const controls = modal.querySelector('#file-preview-controls');
+        const zoomLevel = modal.querySelector('#zoom-level');
+        const setZoomDisplay = (s) => { if (zoomLevel) zoomLevel.textContent = Math.round(s * 100) + '%'; };
+        setZoomDisplay(modal._scale);
+        const createInnerWrapper = () => {
+          const inner = document.createElement('div');
+          inner.id = 'file-preview-inner';
+          inner.style.transition = 'transform 120ms ease';
+          inner.style.willChange = 'transform';
+          inner.style.cursor = 'grab';
+          inner.style.display = 'flex';
+          inner.style.alignItems = 'center';
+          inner.style.justifyContent = 'center';
+          inner.style.minWidth = '100%';
+          inner.style.minHeight = '100%';
+          inner.style.position = 'absolute';
+          inner.style.left = '0';
+          inner.style.top = '0';
+          inner.style.transformOrigin = 'center center';
+          return inner;
+        };
+        const inner = createInnerWrapper();
+        body.appendChild(inner);
+        let contentEl;
+        if (type === 'image') {
+          const img = document.createElement('img');
+          img.src = url;
+          img.alt = displayName;
+          img.style.maxWidth = '100%';
+          img.style.maxHeight = '80vh';
+          img.style.userSelect = 'none';
+          img.style.pointerEvents = 'none';
+          contentEl = img;
+          inner.appendChild(img);
+        } else {
+          const iframeWrap = document.createElement('div');
+          iframeWrap.style.width = '100%';
+          iframeWrap.style.height = '100%';
+          iframeWrap.style.display = 'flex';
+          iframeWrap.style.alignItems = 'center';
+          iframeWrap.style.justifyContent = 'center';
+          const iframe = document.createElement('iframe');
+          iframe.src = url;
+          iframe.style.width = '100%';
+          iframe.style.height = '100%';
+          iframe.style.border = 'none';
+          iframe.style.pointerEvents = 'auto';
+          contentEl = iframeWrap;
+          iframeWrap.appendChild(iframe);
+          inner.appendChild(iframeWrap);
+        }
+
+        const applyTransform = () => { inner.style.transform = `translate(${modal._translateX}px, ${modal._translateY}px) scale(${modal._scale})`; setZoomDisplay(modal._scale); };
+        const zoomIn = () => { modal._scale = Math.min(5, modal._scale + 0.1); applyTransform(); };
+        const zoomOut = () => { modal._scale = Math.max(0.2, modal._scale - 0.1); applyTransform(); };
+        const zoomReset = () => { modal._scale = 1; modal._translateX = 0; modal._translateY = 0; applyTransform(); };
+        if (controls) {
+          const inBtn = modal.querySelector('#zoom-in');
+          const outBtn = modal.querySelector('#zoom-out');
+          const resetBtn = modal.querySelector('#zoom-reset');
+          if (inBtn && !inBtn._bound) { inBtn.addEventListener('click', zoomIn); inBtn._bound = true; }
+          if (outBtn && !outBtn._bound) { outBtn.addEventListener('click', zoomOut); outBtn._bound = true; }
+          if (resetBtn && !resetBtn._bound) { resetBtn.addEventListener('click', zoomReset); resetBtn._bound = true; }
+        }
+        const wheelHandler = (ev) => { ev.preventDefault(); const delta = ev.deltaY || ev.wheelDelta; if (delta > 0) zoomOut(); else zoomIn(); };
+        if (!modal._wheelBound) { body.addEventListener('wheel', wheelHandler, { passive: false }); modal._wheelBound = true; }
+        let dragging = false; let startX = 0; let startY = 0;
+        const pointerDown = (e) => { dragging = true; inner.style.cursor = 'grabbing'; startX = e.clientX; startY = e.clientY; e.preventDefault(); };
+        const pointerMove = (e) => { if (!dragging) return; const dx = e.clientX - startX; const dy = e.clientY - startY; startX = e.clientX; startY = e.clientY; modal._translateX += dx; modal._translateY += dy; applyTransform(); };
+        const pointerUp = () => { dragging = false; inner.style.cursor = 'grab'; };
+        if (!inner._pointerBound) { inner.addEventListener('pointerdown', pointerDown); window.addEventListener('pointermove', pointerMove); window.addEventListener('pointerup', pointerUp); inner._pointerBound = true; }
+        applyTransform();
+      };
+
+      return (
+        <tr className="bg-[#151b28] hover:bg-[#1a202e]">
+          <td className="px-6 py-4 text-gray-300 font-medium">{requirement}</td>
+          <td className="px-6 py-4 text-gray-400">{modifiedDate}</td>
+          <td className="px-6 py-4">
+            {doc.downloadUrl ? (
+              <div className="flex items-center justify-between">
+                <div className="flex items-center gap-3 text-yellow-500">
+                  {getFileIcon()}
+                  <div>
+                    <div className="font-medium text-sm">{displayName || `${requirement}.file`}</div>
+                    {fileSize !== 'Unknown' ? (<div className="text-xs text-gray-400">{fileSize}</div>) : null}
+                  </div>
+                </div>
+
+                <div className="flex items-center gap-2">
+                  <button type="button" title={`Preview ${displayName}`} className="p-2 rounded hover:bg-gray-800 text-gray-200" onClick={(e) => { e.preventDefault(); showPreview(doc.downloadUrl, fileType); }}>
+                    <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z" /><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M2.458 12C3.732 7.943 7.523 5 12 5c4.477 0 8.268 2.943 9.542 7-1.274 4.057-5.065 7-9.542 7-4.477 0-8.268-2.943-9.542-7z" /></svg>
+                  </button>
+                </div>
+              </div>
+            ) : (
+              <span className="text-gray-400 text-sm">URL unavailable</span>
+            )}
+          </td>
+        </tr>
       );
     };
 
