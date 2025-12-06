@@ -1,0 +1,1015 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+  <title>Pasakay - Admin Dashboard</title>
+  <link rel="icon" href="tricy.png" type="image/png">
+
+  <script type="module">
+    import { initializeApp } from "https://www.gstatic.com/firebasejs/12.6.0/firebase-app.js";
+    import { getAuth, signInAnonymously, onAuthStateChanged } from "https://www.gstatic.com/firebasejs/12.6.0/firebase-auth.js";
+    import {
+      getDatabase,
+      ref,
+      onValue,
+      get,
+      set,
+      push,
+      remove,
+      update,
+      runTransaction
+    } from "https://www.gstatic.com/firebasejs/12.6.0/firebase-database.js";
+    import {
+      getStorage,
+      ref as storageRef,
+      uploadBytes
+    } from "https://www.gstatic.com/firebasejs/12.6.0/firebase-storage.js";
+
+    const firebaseConfig = {
+      apiKey: "AIzaSyBS-g5bFBaJ6a35hWmjvoN-s8FuMEuxtew",
+      authDomain: "pasakay-project-ph.firebaseapp.com",
+      databaseURL: "https://pasakay-project-ph-default-rtdb.firebaseio.com",
+      projectId: "pasakay-project-ph",
+      storageBucket: "pasakay-project-ph.firebasestorage.app",
+      messagingSenderId: "189297787561",
+      appId: "1:189297787561:web:ddad5de3fdf638c6d8dfb8",
+      measurementId: "G-2VWQ0C8EZE"
+    };
+
+    const app = initializeApp(firebaseConfig);
+    const auth = getAuth(app);
+    const db = getDatabase(app);
+    const storage = getStorage(app);
+
+    // Sign in anonymously for Storage/Database operations
+    signInAnonymously(auth).catch(err => {
+      console.error('Anonymous sign-in failed:', err);
+    });
+
+    // Monitor auth state
+    onAuthStateChanged(auth, (user) => {
+      if (user) {
+        console.log('✅ Authenticated as:', user.uid);
+        window.currentUser = user;
+      } else {
+        console.warn('⚠️ Not authenticated');
+      }
+    });
+
+    // Expose DB helpers to the non-module React script
+    window.db = db;
+    window.dbRef = ref;
+    window.dbOnValue = onValue;
+    window.dbGet = get;
+    window.dbSet = set;
+    window.dbPush = push;
+    window.dbRemove = remove;
+    window.dbUpdate = update;
+    window.dbRunTransaction = runTransaction;
+
+    // Expose Storage helpers
+    window.storage = storage;
+    window.storageRef = storageRef;
+    window.uploadBytes = uploadBytes;
+  </script>
+
+  <script src="ui-modals.js"></script>
+
+  <!-- React -->
+  <script crossorigin src="https://unpkg.com/react@18/umd/react.development.js"></script>
+  <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.development.js"></script>
+
+  <!-- Babel -->
+  <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+
+  <!-- Tailwind -->
+  <script src="https://cdn.tailwindcss.com"></script>
+
+  <style>
+    body {
+      font-family: "Inter", sans-serif;
+      background: #0a0e1a;
+      margin: 0;
+      overflow-x: hidden;
+    }
+    
+    /* Customized Scrollbar */
+    ::-webkit-scrollbar {
+      width: 10px;
+      height: 10px;
+    }
+    
+    ::-webkit-scrollbar-track {
+      background: #1a2333;
+      border-radius: 10px;
+    }
+    
+    ::-webkit-scrollbar-thumb {
+      background: linear-gradient(180deg, #fbbf24 0%, #f59e0b 100%);
+      border-radius: 10px;
+    }
+    
+    ::-webkit-scrollbar-thumb:hover {
+      background: linear-gradient(180deg, #fcd34d 0%, #fbbf24 100%);
+    }
+    
+    /* Firefox Scrollbar */
+    * {
+      scrollbar-color: #2e3c57 #1a2333;
+      scrollbar-width: thin;
+    }
+  </style>
+</head>
+<body>
+  <div id="root"></div>
+
+  <script type="text/babel">
+    const { useState, useEffect } = React;
+
+    // Helper: format license to pattern A00-00-000000 
+    const formatLicense = (value) => {
+      if (!value) return '';
+      const up = value.toUpperCase();
+      const raw = up.replace(/[^A-Z0-9]/g, '');
+      const p1 = raw.slice(0, 3);
+      const p2 = raw.slice(3, 5);
+      const p3 = raw.slice(5, 11);
+      let formatted = p1;
+      if (p2) formatted += '-' + p2;
+      if (p3) formatted += '-' + p3;
+      return formatted;
+    };
+
+    const isValidLicense = (value) => {
+      return /^[A-Z]\d{2}-\d{2}-\d{6}$/.test((value||'').toString());
+    };
+    const normalizeLicenseForCompare = (value) => {
+      return (value||'').toString().toUpperCase().replace(/[^A-Z0-9]/g, '');
+    };
+
+    // Helper: strip +63 prefix for display
+    const stripPhonePrefix = (phone) => {
+      if (!phone) return '';
+      const str = phone.toString();
+      if (str.startsWith('+63')) return str.slice(3);
+      return str;
+    };
+
+    const AddDriverModal = ({ onClose, onSave }) => {
+      const [newDriver, setNewDriver] = useState({
+        name: "",
+        tricycle: "",
+        contact: "",
+        license: "",
+        status: "Active"
+      });
+      const [nameError, setNameError] = useState("");
+      const [licenseError, setLicenseError] = useState("");
+      const [isSaving, setIsSaving] = useState(false);
+
+      const handleChange = (field, value) => {
+        if (field === 'contact') {
+          const numericValue = value.replace(/\D/g, '').slice(0, 11);
+          setNewDriver(prev => ({
+            ...prev,
+            [field]: numericValue
+          }));
+        } else if (field === 'name') {
+          const hadDigits = /\d/.test(value);
+          if (hadDigits) {
+            setNameError('Names cannot contain numbers');
+          } else {
+            setNameError('');
+          }
+          const sanitized = value.replace(/[^a-zA-Z\s\-']/g, '');
+          setNewDriver(prev => ({
+            ...prev,
+            [field]: sanitized
+          }));
+        } else {
+          setNewDriver(prev => ({
+            ...prev,
+            [field]: value
+          }));
+        }
+        
+        if (field === 'license') {
+          const raw = value.replace(/[^A-Za-z0-9\-]/g, '');
+          setNewDriver(prev => ({ ...prev, license: raw }));
+          setLicenseError('');
+        }
+      };
+
+      const handleBlur = (field) => {
+        if (field === 'license') {
+          const formatted = formatLicense(newDriver.license);
+          setNewDriver(prev => ({ ...prev, license: formatted }));
+          if (!formatted || formatted.length < 13) {
+            setLicenseError('License number seems incomplete.');
+            return;
+          }
+          if (!isValidLicense(formatted)) {
+            setLicenseError('License must match format A01-23-456789');
+          } else {
+            setLicenseError('');
+          }
+        }
+      };
+
+      const handleAddDriver = () => {
+        if (isSaving) return;
+        if (!newDriver.name || !newDriver.tricycle || !newDriver.contact || !newDriver.license) {
+          window.showAlert("Please fill in all fields!", 'error');
+          return;
+        }
+        const formattedLicense = formatLicense(newDriver.license);
+        const licenseRegex = /^[A-Z]\d{2}-\d{2}-\d{6}$/;
+        if (!licenseRegex.test(formattedLicense)) {
+          window.showAlert('License number must match format like A01-23-456789', 'error');
+          return;
+        }
+        if (/\d/.test(newDriver.name)) {
+          window.showAlert('Full name cannot contain numbers. Please remove any digits.', 'error');
+          return;
+        }
+        if (newDriver.contact.length !== 11) {
+          window.showAlert("Phone number must be exactly 11 digits!", 'error');
+          return;
+        }
+        const duplicateTricycle = window.drivers && window.drivers.some(d => d.tricycle === newDriver.tricycle);
+        if (duplicateTricycle) {
+          window.showAlert("Error: Plate number already exists! Please use a unique plate number.", 'error');
+          return;
+        }
+        try {
+          const normNew = normalizeLicenseForCompare(newDriver.license);
+          const dup = window.drivers && window.drivers.some(d => normalizeLicenseForCompare(d.license) === normNew);
+          if (dup) {
+            window.showAlert('License number already exists. Please provide a unique license number.', 'error');
+            return;
+          }
+        } catch(e) {}
+        try {
+          setIsSaving(true);
+          const res = onSave(newDriver);
+          if (res && typeof res.then === 'function') {
+            res.then(() => setIsSaving(false)).catch(() => setIsSaving(false));
+          } else {
+            setIsSaving(false);
+          }
+        } catch (e) {
+          setIsSaving(false);
+          throw e;
+        }
+      };
+
+      return (
+        <div className="fixed inset-0 flex items-center justify-center bg-black bg-opacity-80 z-50">
+          <div className="bg-[#1e2538] p-8 rounded-xl w-full max-w-md">
+            <h2 className="text-2xl font-bold mb-6 text-white">Add New Driver</h2>
+            <div className="grid grid-cols-2 gap-4">
+              <input 
+                className="col-span-1 px-4 py-3 rounded-lg bg-[#252d42] text-white border border-gray-700 focus:border-yellow-500 focus:outline-none" 
+                placeholder="Full Name" 
+                value={newDriver.name}
+                onChange={(e) => handleChange('name', e.target.value)}
+              />
+              {nameError && (
+                <p className="col-span-2 text-sm text-red-400 mt-1">{nameError}</p>
+              )}
+              <input 
+                className="col-span-1 px-4 py-3 rounded-lg bg-[#252d42] text-white border border-gray-700 focus:border-yellow-500 focus:outline-none" 
+                placeholder="Tricycle Plate Number" 
+                value={newDriver.tricycle}
+                onChange={(e) => handleChange('tricycle', e.target.value)}
+              />
+              <input 
+                className="col-span-1 px-4 py-3 rounded-lg bg-[#252d42] text-white border border-gray-700 focus:border-yellow-500 focus:outline-none" 
+                placeholder="Phone Number (11 digits)" 
+                value={newDriver.contact}
+                onChange={(e) => handleChange('contact', e.target.value)}
+                maxLength={11}
+              />
+              <input 
+                className="col-span-1 px-4 py-3 rounded-lg bg-[#252d42] text-white border border-gray-700 focus:border-yellow-500 focus:outline-none" 
+                placeholder="License Number (e.g. A01-23-456789)" 
+                value={newDriver.license}
+                onChange={(e) => handleChange('license', e.target.value)}
+                onBlur={() => handleBlur('license')}
+                maxLength={13}
+              />
+              {licenseError && (
+                <p className="col-span-2 text-sm text-red-400 mt-1">{licenseError}</p>
+              )}
+            </div>
+            <p className="text-xs text-gray-400 mt-2">Phone number: {newDriver.contact.length}/11 digits</p>
+            <div className="flex justify-between mt-6">
+              <button onClick={onClose} className="bg-red-600 hover:bg-red-700 px-8 py-3 rounded-lg font-semibold text-white">Cancel</button>
+              <button onClick={handleAddDriver} disabled={isSaving} className={`px-8 py-3 rounded-lg font-semibold text-white ${isSaving ? 'bg-gray-600 cursor-not-allowed' : 'bg-green-600 hover:bg-green-700'}`}>
+                {isSaving ? 'Adding…' : 'Add Driver'}
+              </button>
+            </div>
+          </div>
+        </div>
+      );
+    };
+
+    const ExportDataModal = ({ drivers, onClose }) => {
+      const [selectedDrivers, setSelectedDrivers] = useState([]);
+
+      const toggleDriver = (index) => {
+        setSelectedDrivers(prev => 
+          prev.includes(index) 
+            ? prev.filter(i => i !== index)
+            : [...prev, index]
+        );
+      };
+
+      const exportToCSV = (driversToExport, filename) => {
+        const headers = ["Name", "Plate #", "License", "Contact", "Status", "Registered Date", "Franchise Expiry"];
+        const csvContent = [
+          headers.join(","),
+          ...driversToExport.map(driver => 
+            `"${driver.name}","${driver.tricycle}","${driver.license}","${driver.contact}","${driver.status}","Jan 15, 2024","Jan 15, 2025"`
+          )
+        ].join("\n");
+
+        const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
+        const link = document.createElement("a");
+        const url = URL.createObjectURL(blob);
+        link.setAttribute("href", url);
+        link.setAttribute("download", filename);
+        link.style.visibility = 'hidden';
+        document.body.appendChild(link);
+        link.click();
+        document.body.removeChild(link);
+      };
+
+      const handleExportSelected = () => {
+        if (selectedDrivers.length === 0) {
+          window.showAlert("Please select at least one driver to export!", 'error');
+          return;
+        }
+        const driversToExport = selectedDrivers.map(index => drivers[index]);
+        exportToCSV(driversToExport, 'selected_drivers.csv');
+        window.showAlert(`Exported ${selectedDrivers.length} driver(s) successfully!`, 'success');
+      };
+
+      const handleExportAll = () => {
+        exportToCSV(drivers, 'all_drivers.csv');
+        window.showAlert(`Exported all ${drivers.length} drivers successfully!`, 'success');
+      };
+
+      return (
+        <div className="fixed inset-0 flex items-center justify-center bg-black bg-opacity-80 z-50 overflow-y-auto py-8">
+          <div className="bg-[#1e2538] p-8 rounded-xl w-full max-w-3xl max-h-[90vh] overflow-y-auto">
+            <h2 className="text-2xl font-bold mb-6 text-white">Export Data</h2>
+            <p className="text-gray-300 mb-4 text-sm">Select drivers to export or export all data</p>
+            <div className="space-y-3">
+              {drivers.map((driver, idx) => (
+                <div 
+                  key={idx} 
+                  onClick={() => toggleDriver(idx)}
+                  className={`flex justify-between items-center p-4 rounded-lg cursor-pointer transition-all ${
+                    selectedDrivers.includes(idx) 
+                      ? 'bg-yellow-500 bg-opacity-20 border-2 border-yellow-500' 
+                      : 'bg-[#252d42] border-2 border-transparent hover:border-gray-600'
+                  }`}
+                >
+                  <div className="flex items-center gap-3">
+                    <input 
+                      type="checkbox" 
+                      checked={selectedDrivers.includes(idx)}
+                      onChange={() => toggleDriver(idx)}
+                      className="w-5 h-5 cursor-pointer"
+                    />
+                    <div>
+                      <p className="font-bold text-white">{driver.name}</p>
+                      <p className="text-sm text-gray-400">
+                        Plate #{driver.tricycle} | License: {driver.license} | Phone: {stripPhonePrefix(driver.contact)}
+                      </p>
+                    </div>
+                  </div>
+                  <span className={`px-3 py-1 rounded text-sm font-bold text-white ${driver.status === "Active" ? "bg-green-500" : "bg-gray-500"}`}>
+                    {driver.status === "Active" ? "ONLINE" : "OFFLINE"}
+                  </span>
+                </div>
+              ))}
+            </div>
+            <div className="flex justify-between mt-6">
+              <button onClick={onClose} className="bg-red-600 hover:bg-red-700 px-6 py-3 rounded-lg font-semibold text-white">Close</button>
+              <div className="flex gap-3">
+                <button 
+                  onClick={handleExportSelected}
+                  className="bg-yellow-500 hover:bg-yellow-600 px-6 py-3 rounded-lg font-semibold text-gray-900 flex items-center gap-2"
+                >
+                  <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
+                  </svg>
+                  Export Selected ({selectedDrivers.length})
+                </button>
+                <button 
+                  onClick={handleExportAll}
+                  className="bg-yellow-500 hover:bg-yellow-600 px-6 py-3 rounded-lg font-semibold text-gray-900 flex items-center gap-2"
+                >
+                  <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 10v6m0 0l-3-3m3 3l3-3m2 8H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
+                  </svg>
+                  Export All ({drivers.length})
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      );
+    };
+
+    const EditDriverModal = ({ driver, driverIndex, onClose, onSave }) => {
+      const formatDateForInput = (iso) => {
+        if (!iso) return '';
+        try {
+          const d = new Date(iso);
+          const yyyy = d.getUTCFullYear();
+          const mm = String(d.getUTCMonth() + 1).padStart(2, '0');
+          const dd = String(d.getUTCDate()).padStart(2, '0');
+          return `${yyyy}-${mm}-${dd}`;
+        } catch (e) { return ''; }
+      };
+
+      const [editedDriver, setEditedDriver] = useState({
+        name: driver.name,
+        contact: stripPhonePrefix(driver.contact),
+        registeredDate: formatDateForInput(driver.registeredDate || ''),
+        license: driver.license,
+        tricycle: driver.tricycle,
+        franchiseExpiry: driver.franchiseExpiry || ''
+      });
+      const [editedLicenseError, setEditedLicenseError] = useState("");
+
+      const handleChange = (field, value) => {
+        if (field === 'contact') {
+          const numericValue = value.replace(/\D/g, '').slice(0, 11);
+          setEditedDriver(prev => ({
+            ...prev,
+            [field]: numericValue
+          }));
+        } else if (field === 'license') {
+          const raw = value.replace(/[^A-Za-z0-9\-]/g, '');
+          setEditedDriver(prev => ({ ...prev, license: raw }));
+          setEditedLicenseError('');
+        } else {
+          setEditedDriver(prev => ({
+            ...prev,
+            [field]: value
+          }));
+        }
+      };
+
+      const handleEditBlur = (field) => {
+        if (field === 'license') {
+          const formatted = formatLicense(editedDriver.license);
+          setEditedDriver(prev => ({ ...prev, license: formatted }));
+          if (!formatted || formatted.length < 13) {
+            setEditedLicenseError('License number seems incomplete.');
+            return;
+          }
+          if (!isValidLicense(formatted)) {
+            setEditedLicenseError('License must match format A01-23-456789');
+          } else {
+            setEditedLicenseError('');
+          }
+        }
+      };
+
+      const handleSave = async () => {
+        const contactDigits = editedDriver.contact.toString().replace(/\D/g, '');
+        if (contactDigits.length !== 11) {
+          window.showAlert("Phone number must be exactly 11 digits!", 'error');
+          return;
+        }
+        if (!isValidLicense(editedDriver.license)) {
+          window.showAlert('License number must match format like A01-23-456789', 'error');
+          return;
+        }
+        try {
+          const normEdited = normalizeLicenseForCompare(editedDriver.license);
+          const dup = window.drivers && window.drivers.some(d => normalizeLicenseForCompare(d.license) === normEdited && d.id !== driver.id);
+          if (dup) {
+            window.showAlert('License number already exists for another driver. Please use a unique license number.', 'error');
+            return;
+          }
+        } catch(e) {}
+
+        const contactWithPrefix = '+63' + contactDigits;
+
+        try {
+          const driverToUpdate = driver || {};
+          const driverId = driverToUpdate.driverId || null;
+          const userId = driverToUpdate.userId;
+
+          if (userId) {
+            const nameParts = (editedDriver.name || '').trim().split(/\s+/);
+            const firstname = nameParts[0] || '';
+            const lastname = nameParts.length > 1 ? nameParts[nameParts.length - 1] : '';
+            const middlename = nameParts.length > 2 ? nameParts.slice(1, -1).join(' ') : '';
+            const userRef = window.dbRef(window.db, `users/${userId}`);
+            const userSnap = await window.dbGet(userRef);
+            const userObj = userSnap.exists() ? userSnap.val() : {};
+            userObj.Firstname = firstname;
+            userObj.Middlename = middlename;
+            userObj.Lastname = lastname;
+            userObj.MobileNumber = contactWithPrefix;
+            await window.dbSet(userRef, userObj);
+          }
+
+          if (driverId) {
+            const driverRef = window.dbRef(window.db, `drivers/${driverId}`);
+            await window.dbUpdate(driverRef, {
+              LicenseNumber: editedDriver.license,
+              TricyclePlateNumber: editedDriver.tricycle,
+              TricycleNumber: editedDriver.tricycle,
+              FranchiseExpiry: editedDriver.franchiseExpiry || ''
+            });
+          }
+
+          onSave(driverIndex, { ...editedDriver, contact: contactWithPrefix });
+          window.showAlert('Driver information updated successfully!', 'success');
+          onClose();
+        } catch (err) {
+          console.error('Error saving driver edits:', err);
+          window.showAlert('Error saving changes: ' + (err && err.message ? err.message : err), 'error');
+        }
+      };
+
+      if (!driver) return null;
+      return (
+        <div className="fixed inset-0 flex items-center justify-center bg-black bg-opacity-80 z-50 p-4">
+          <div className="bg-[#1e2538] p-8 rounded-xl w-full max-w-md sm:max-w-2xl max-h-[90vh] overflow-y-auto">
+            <h2 className="font-bold mb-6 text-white text-2xl">Edit Driver Information</h2>
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+              <div className="col-span-2">
+                <label className="block text-gray-300 mb-2 font-medium">Driver Name</label>
+                <input 
+                  className="w-full px-4 py-3 rounded-lg bg-[#252d42] text-white border border-gray-700 focus:border-yellow-500 focus:outline-none" 
+                  value={editedDriver.name}
+                  onChange={(e) => handleChange('name', e.target.value)}
+                />
+              </div>
+              <div>
+                <label className="block text-gray-300 mb-2 font-medium">Contact Number (11 digits)</label>
+                <div className="flex">
+                  <div className="inline-flex items-center px-3 rounded-l-lg bg-[#1b2333] text-white border border-r-0 border-gray-700">+63</div>
+                  <input 
+                    className="w-full px-4 py-3 rounded-r-lg bg-[#252d42] text-white border border-gray-700 focus:border-yellow-500 focus:outline-none" 
+                    value={editedDriver.contact}
+                    onChange={(e) => handleChange('contact', e.target.value)}
+                    maxLength={11}
+                  />
+                </div>
+                <p className="text-xs text-gray-400 mt-1">{editedDriver.contact.replace(/\D/g, '').length}/11 digits</p>
+              </div>
+              <div>
+                <label className="block text-gray-300 mb-2 font-medium">Registration Date</label>
+                <input 
+                  type="date" 
+                  className="w-full px-4 py-3 rounded-lg bg-[#252d42] text-white border border-gray-700 focus:border-yellow-500 focus:outline-none" 
+                  value={editedDriver.registeredDate}
+                  onChange={(e) => handleChange('registeredDate', e.target.value)}
+                />
+              </div>
+              <div>
+                <label className="block text-gray-300 mb-2 font-medium">License Number</label>
+                <input 
+                  className="w-full px-4 py-3 rounded-lg bg-[#252d42] text-white border border-gray-700 focus:border-yellow-500 focus:outline-none" 
+                  value={editedDriver.license}
+                  onChange={(e) => handleChange('license', e.target.value)}
+                  onBlur={() => handleEditBlur('license')}
+                />
+                {editedLicenseError && (
+                  <p className="text-sm text-red-400 mt-1">{editedLicenseError}</p>
+                )}
+              </div>
+              <div>
+                <label className="block text-gray-300 mb-2 font-medium">Plate Number</label>
+                <input 
+                  className="w-full px-4 py-3 rounded-lg bg-[#252d42] text-white border border-gray-700 focus:border-yellow-500 focus:outline-none" 
+                  value={editedDriver.tricycle}
+                  onChange={(e) => handleChange('tricycle', e.target.value)}
+                />
+              </div>
+              <div>
+                <label className="block text-gray-300 mb-2 font-medium">Franchise Expiry</label>
+                <input 
+                  type="date" 
+                  className="w-full px-4 py-3 rounded-lg bg-[#252d42] text-white border border-gray-700 focus:border-yellow-500 focus:outline-none" 
+                  value={editedDriver.franchiseExpiry}
+                  onChange={(e) => handleChange('franchiseExpiry', e.target.value)}
+                />
+              </div>
+            </div>
+            <div className="flex flex-col sm:flex-row sm:justify-between gap-3 mt-6">
+              <button onClick={onClose} className="bg-red-600 hover:bg-red-700 px-6 py-3 rounded-lg font-semibold text-white w-full sm:w-auto">Cancel</button>
+              <button onClick={handleSave} className="bg-green-600 hover:bg-green-700 px-6 py-3 rounded-lg font-semibold text-white w-full sm:w-auto">Save Changes</button>
+            </div>
+          </div>
+        </div>
+      );
+    };
+
+    const claimSmallestNumericId = async (baseNode) => {
+      if (!window.dbGet || !window.dbRef || !window.dbRunTransaction) throw new Error('DB helpers missing');
+      const nodeRef = window.dbRef(window.db, baseNode);
+      const snap = await window.dbGet(nodeRef);
+      const keys = snap && snap.val() ? Object.keys(snap.val()) : [];
+      const numericKeys = keys.map(k => parseInt(k, 10)).filter(n => Number.isInteger(n) && n > 0);
+      const max = numericKeys.length ? Math.max(...numericKeys) : 0;
+
+      for (let candidate = 1; candidate <= max; candidate++) {
+        if (!numericKeys.includes(candidate)) {
+          const allocRef = window.dbRef(window.db, `allocations/${baseNode}/${candidate}`);
+          try {
+            const tx = await window.dbRunTransaction(allocRef, (current) => {
+              if (current) return;
+              return { reservedAt: Date.now() };
+            });
+            if (tx && tx.committed) {
+              return candidate;
+            }
+          } catch (e) {}
+        }
+      }
+
+      const newId = max + 1;
+      const allocRef2 = window.dbRef(window.db, `allocations/${baseNode}/${newId}`);
+      await window.dbRunTransaction(allocRef2, (current) => {
+        if (current) return;
+        return { reservedAt: Date.now() };
+      });
+      return newId;
+    };
+
+    const AdminDashboard = () => {
+      const [currentPage, setCurrentPage] = useState('drivers');
+      const [selectedDriver, setSelectedDriver] = useState(null);
+      const [selectedDriverIndex, setSelectedDriverIndex] = useState(null);
+      const [showExportModal, setShowExportModal] = useState(false);
+      const [showAddModal, setShowAddModal] = useState(false);
+      const [confirmDelete, setConfirmDelete] = useState({ open: false, index: null });
+
+      const [rawUsers, setRawUsers] = useState({});
+      const [rawDrivers, setRawDrivers] = useState({});
+      const [drivers, setDrivers] = useState([]);
+
+      useEffect(() => {
+        if (!window.db || !window.dbRef || !window.dbOnValue) return;
+
+        const usersRef = window.dbRef(window.db, 'users');
+        const driversRef = window.dbRef(window.db, 'drivers');
+
+        const unsubUsers = window.dbOnValue(usersRef, snap => setRawUsers(snap.val() || {}));
+        const unsubDrivers = window.dbOnValue(driversRef, snap => setRawDrivers(snap.val() || {}));
+
+        return () => {
+          try { unsubUsers(); } catch(e) {}
+          try { unsubDrivers(); } catch(e) {}
+        };
+      }, []);
+
+      useEffect(() => {
+        const makeFullName = (u) => {
+          if (!u) return 'Unknown';
+          return [u.Firstname, u.Middlename, u.Lastname].filter(Boolean).join(' ');
+        };
+
+        const usersVal = rawUsers || {};
+        const drvsVal = rawDrivers || {};
+        const driversArr = Object.entries(usersVal)
+          .map(([userId, u]) => {
+            if (!u) return null;
+            if (String(u.RoleID) !== '2') return null;
+            if (!u.IsActive) return null;
+            if (u.DeletedAt) return null;
+
+            let drvKey = null;
+            let drvRec = null;
+            for (const [k, drv] of Object.entries(drvsVal)) {
+              if (!drv) continue;
+              if (String(drv.UserID) === String(userId)) { drvKey = k; drvRec = drv; break; }
+            }
+
+            const name = makeFullName(u);
+            const tricycle = drvRec ? (drvRec.TricyclePlateNumber || drvRec.TricycleNumber || '') : '';
+            const license = drvRec ? (drvRec.LicenseNumber || '') : '';
+            const contact = u ? u.MobileNumber : '';
+            const status = drvRec && (drvRec.Status === 'Active' || (drvRec.ApplicationStatus || '').toString().toUpperCase().includes('ADDED')) ? 'Active' : 'Inactive';
+
+            return {
+              id: drvKey || `user-${userId}`,
+              driverId: drvKey || null,
+              userId: userId,
+              name,
+              tricycle,
+              license,
+              contact,
+              status,
+              isActiveUser: !!u.IsActive,
+              registeredDate: u.CreatedAt || '' ,
+              franchiseExpiry: drvRec ? (drvRec.FranchiseExpiry || '') : ''
+            };
+          })
+          .filter(Boolean);
+
+        setDrivers(driversArr);
+        window.drivers = driversArr;
+      }, [rawUsers, rawDrivers]);
+
+      const handleEditDriver = (index) => {
+        setSelectedDriver(drivers[index]);
+        setSelectedDriverIndex(index);
+      };
+
+      const handleSaveDriver = async (index, editedDriver) => {
+        try {
+          const driverToUpdate = drivers[index];
+          const driverId = driverToUpdate.id;
+          const userId = driverToUpdate.userId;
+
+          const nameParts = editedDriver.name.trim().split(/\s+/);
+          const firstname = nameParts[0] || '';
+          const lastname = nameParts.length > 1 ? nameParts[nameParts.length - 1] : '';
+          const middlename = nameParts.length > 2 ? nameParts.slice(1, -1).join(' ') : '';
+
+          const userRef = window.dbRef(window.db, `users/${userId}`);
+          const userSnap = await window.dbGet(userRef);
+          const userObj = userSnap.exists() ? userSnap.val() : {};
+          userObj.Firstname = firstname;
+          userObj.Middlename = middlename;
+          userObj.Lastname = lastname;
+          userObj.MobileNumber = editedDriver.contact;
+          await window.dbSet(userRef, userObj);
+
+          const driverRef = window.dbRef(window.db, `drivers/${driverId}`);
+          await window.dbUpdate(driverRef, {
+            LicenseNumber: editedDriver.license,
+            TricyclePlateNumber: editedDriver.tricycle,
+            TricycleNumber: editedDriver.tricycle,
+            FranchiseExpiry: editedDriver.franchiseExpiry || ''
+          });
+
+          const updatedDrivers = [...drivers];
+          updatedDrivers[index] = {
+            ...updatedDrivers[index],
+            name: editedDriver.name,
+            contact: editedDriver.contact,
+            license: editedDriver.license,
+            tricycle: editedDriver.tricycle
+          };
+          setDrivers(updatedDrivers);
+          setSelectedDriver(null);
+          setSelectedDriverIndex(null);
+          window.showAlert("Driver information updated successfully!", 'success');
+        } catch (error) {
+          console.error('Error updating driver:', error);
+          window.showAlert('Error updating driver: ' + error.message, 'error');
+        }
+      };
+
+      const handleAddNewDriver = async (newDriver) => {
+        try {
+          const newUserId = await claimSmallestNumericId('users');
+
+          const nameParts = newDriver.name.trim().split(/\s+/);
+          const firstname = nameParts[0] || '';
+          const lastname = nameParts.length > 1 ? nameParts[nameParts.length - 1] : '';
+          const middlename = nameParts.length > 2 ? nameParts.slice(1, -1).join(' ') : '';
+
+          const userData = {
+            Firstname: firstname,
+            Middlename: middlename,
+            Lastname: lastname,
+            MobileNumber: newDriver.contact,
+            Role: 'Driver',
+            RoleID: 2,
+            CreatedAt: new Date().toISOString(),
+            IsActive: true,
+            Status: 'Active'
+          };
+
+          const userRef = window.dbRef(window.db, `users/${newUserId}`);
+          await window.dbSet(userRef, userData);
+
+          const newDriverId = await claimSmallestNumericId('drivers');
+          const formattedLicense = formatLicense(newDriver.license);
+
+          const driverData = {
+            UserID: newUserId,
+            LicenseNumber: formattedLicense,
+            TricyclePlateNumber: newDriver.tricycle,
+            TricycleNumber: newDriver.tricycle,
+            Status: 'Active',
+            ApplicationStatus: 'ADDED',
+            IsApplying: false,
+            CreatedAt: new Date().toISOString()
+          };
+
+          const driverRef = window.dbRef(window.db, `drivers/${newDriverId}`);
+          await window.dbSet(driverRef, driverData);
+
+          setShowAddModal(false);
+          window.showAlert(`Driver ${newDriver.name} added successfully (ID: ${newDriverId}) to Firebase!`, 'success');
+        } catch (error) {
+          console.error('Error adding driver:', error);
+          window.showAlert('Error adding driver to database: ' + (error && error.message ? error.message : error), 'error');
+        }
+      };
+
+      const handleDeleteDriver = (index) => {
+        setConfirmDelete({ open: true, index });
+      };
+
+      const performDeleteDriver = async (index) => {
+        const driverToDelete = drivers[index];
+        if (!driverToDelete) return;
+        try {
+          const driverKey = driverToDelete.id;
+          const driverRecord = rawDrivers && rawDrivers[driverKey];
+          const userIdToDelete = driverRecord ? driverRecord.UserID : null;
+
+          const driverRef = window.dbRef(window.db, `drivers/${driverKey}`);
+          await window.dbUpdate(driverRef, {
+            Status: 'Inactive',
+            DeletedAt: new Date().toISOString()
+          });
+
+          if (userIdToDelete) {
+            const userRef = window.dbRef(window.db, `users/${userIdToDelete}`);
+            await window.dbUpdate(userRef, {
+              IsActive: false,
+              Status: 'Inactive',
+              DeletedAt: new Date().toISOString()
+            });
+          }
+
+          setConfirmDelete({ open: false, index: null });
+          window.showAlert(`Driver ${driverToDelete.name} has been deactivated (soft-deleted).`, 'success');
+        } catch (error) {
+          console.error('Error deleting driver:', error);
+          window.showAlert('Error deleting driver: ' + (error && error.message ? error.message : error), 'error');
+          setConfirmDelete({ open: false, index: null });
+        }
+      };
+
+      return (
+        <div className="min-h-screen bg-[#0a0e1a]">
+          {/* Header */}
+          <header className="bg-[#151b28] border-b border-gray-700">
+            <div className="max-w-7xl mx-auto px-6 py-4 flex items-center justify-between">
+              <div className="flex items-center gap-3">
+                <img src="tricy.png" alt="Logo" className="w-8 h-8" />
+                <div>
+                  <h1 className="text-xl font-bold text-yellow-500">PASAKAY</h1>
+                  <p className="text-xs text-gray-400">Admin Dashboard</p>
+                </div>
+              </div>
+              <div className="text-right">
+                <p className="text-gray-300">Administrator</p>
+                <p className="text-xs text-gray-500">System Admin</p>
+              </div>
+            </div>
+          </header>
+
+          {/* Navigation Tabs */}
+          <div className="bg-[#0f1419] border-b border-gray-700 sticky top-0 z-10">
+            <div className="max-w-7xl mx-auto px-6">
+              <div className="flex gap-8">
+                <button
+                  onClick={() => setCurrentPage('drivers')}
+                  className={`py-4 px-2 border-b-2 font-medium transition-colors ${
+                    currentPage === 'drivers'
+                      ? 'border-yellow-500 text-yellow-500'
+                      : 'border-transparent text-gray-400 hover:text-yellow-400'
+                  }`}
+                >
+                  <svg className="w-5 h-5 inline mr-2" fill="currentColor" viewBox="0 0 20 20">
+                    <path d="M9 6a3 3 0 11-6 0 3 3 0 016 0zM9 10a6 6 0 1 1-12 0 6 6 0 0 1 12 0z" />
+                  </svg>
+                  Driver Management
+                </button>
+              </div>
+            </div>
+          </div>
+
+          {/* Content */}
+          <div className="max-w-7xl mx-auto px-6 py-8">
+            {currentPage === 'drivers' && (
+              <div className="space-y-6">
+                <div className="flex justify-between items-center">
+                  <h2 className="text-2xl font-bold text-white">Driver Management ({drivers.length} drivers)</h2>
+                  <div className="flex gap-3">
+                    <button 
+                      onClick={() => setShowExportModal(true)}
+                      className="bg-yellow-500 hover:bg-yellow-600 px-4 py-2 rounded-lg text-gray-900 font-semibold flex items-center gap-2"
+                    >
+                      <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 10v6m0 0l-3-3m3 3l3-3m2 8H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
+                      </svg>
+                      Export
+                    </button>
+                    <button 
+                      onClick={() => setShowAddModal(true)}
+                      className="bg-yellow-500 hover:bg-yellow-600 px-4 py-2 rounded-lg text-gray-900 font-semibold flex items-center gap-2"
+                    >
+                      <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 4v16m8-8H4" />
+                      </svg>
+                      Add Driver
+                    </button>
+                  </div>
+                </div>
+
+                <div className="bg-[#1e2538] rounded-lg overflow-hidden">
+                  <div className="overflow-x-auto">
+                    <table className="w-full">
+                      <thead>
+                        <tr className="border-b border-gray-700 bg-[#252d42]">
+                          <th className="px-6 py-4 text-left text-gray-300 font-semibold">Name</th>
+                          <th className="px-6 py-4 text-left text-gray-300 font-semibold">Plate #</th>
+                          <th className="px-6 py-4 text-left text-gray-300 font-semibold">License</th>
+                          <th className="px-6 py-4 text-left text-gray-300 font-semibold">Phone</th>
+                          <th className="px-6 py-4 text-left text-gray-300 font-semibold">Status</th>
+                          <th className="px-6 py-4 text-right text-gray-300 font-semibold">Actions</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {drivers.map((driver, index) => (
+                          <tr key={index} className="border-b border-gray-700 hover:bg-[#252d42] transition-colors">
+                            <td className="px-6 py-4 text-white font-medium">{driver.name}</td>
+                            <td className="px-6 py-4 text-gray-300">{driver.tricycle}</td>
+                            <td className="px-6 py-4 text-gray-300">{driver.license}</td>
+                            <td className="px-6 py-4 text-gray-300">{stripPhonePrefix(driver.contact)}</td>
+                            <td className="px-6 py-4">
+                              <span className={`px-3 py-1 rounded-full text-xs font-bold ${driver.status === 'Active' ? 'bg-green-500 text-white' : 'bg-gray-500 text-white'}`}>
+                                {driver.status === 'Active' ? 'Active' : 'Inactive'}
+                              </span>
+                            </td>
+                            <td className="px-6 py-4 text-right">
+                              <button 
+                                onClick={() => handleEditDriver(index)}
+                                className="bg-blue-600 hover:bg-blue-700 px-3 py-1 rounded text-xs font-semibold text-white mr-2"
+                              >
+                                Edit
+                              </button>
+                              <button 
+                                onClick={() => handleDeleteDriver(index)}
+                                className="bg-red-600 hover:bg-red-700 px-3 py-1 rounded text-xs font-semibold text-white"
+                              >
+                                Delete
+                              </button>
+                            </td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                </div>
+              </div>
+            )}
+          </div>
+
+          {/* Modals */}
+          {showAddModal && (
+            <AddDriverModal onClose={() => setShowAddModal(false)} onSave={handleAddNewDriver} />
+          )}
+          {selectedDriver && (
+            <EditDriverModal 
+              driver={selectedDriver} 
+              driverIndex={selectedDriverIndex}
+              onClose={() => {
+                setSelectedDriver(null);
+                setSelectedDriverIndex(null);
+              }} 
+              onSave={handleSaveDriver}
+            />
+          )}
+          {showExportModal && <ExportDataModal drivers={drivers} onClose={() => setShowExportModal(false)} />}
+          {confirmDelete.open && (
+            <div className="fixed inset-0 flex items-center justify-center bg-black bg-opacity-80 z-50">
+              <div className="bg-[#1e2538] p-8 rounded-xl w-full max-w-md">
+                <h2 className="text-2xl font-bold mb-4 text-white">Confirm Delete</h2>
+                <p className="text-gray-300 mb-6">Are you sure you want to delete <span className="font-semibold text-white">{drivers[confirmDelete.index] ? drivers[confirmDelete.index].name : ''}</span>?</p>
+                <div className="flex justify-end gap-3">
+                  <button onClick={() => setConfirmDelete({ open: false, index: null })} className="bg-gray-600 hover:bg-gray-700 px-6 py-2 rounded-lg font-semibold text-white">Cancel</button>
+                  <button onClick={() => performDeleteDriver(confirmDelete.index)} className="bg-red-600 hover:bg-red-700 px-6 py-2 rounded-lg font-semibold text-white">Delete</button>
+                </div>
+              </div>
+            </div>
+          )}
+        </div>
+      );
+    };
+
+    ReactDOM.createRoot(document.getElementById("root")).render(<AdminDashboard />);
+  </script>
+</body>
+</html>
