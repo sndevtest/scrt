@@ -117,7 +117,7 @@
         const usersRef = window.dbRef(window.db, 'users');
         const driversRef = window.dbRef(window.db, 'drivers');
         const passengersRef = window.dbRef(window.db, 'passengers');
-        const bookingsRef = window.dbRef(window.db, 'booking');
+        const bookingsRef = window.dbRef(window.db, 'bookings');
 
         const unsubUsers = window.dbOnValue(usersRef, snap => setRawUsers(snap.val() || {}));
         const unsubDrivers = window.dbOnValue(driversRef, snap => setRawDrivers(snap.val() || {}));
