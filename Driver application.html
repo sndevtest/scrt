@@ -20,7 +20,7 @@
     import { initializeApp } from "https://www.gstatic.com/firebasejs/12.6.0/firebase-app.js";
     import { getAuth, signInAnonymously, onAuthStateChanged, signOut } from "https://www.gstatic.com/firebasejs/12.6.0/firebase-auth.js";
     import { getDatabase, ref, onValue, get, set, update, push, runTransaction } from "https://www.gstatic.com/firebasejs/12.6.0/firebase-database.js";
-    import { getStorage, ref as storageRef, uploadBytes, getBytes, list, listAll } from "https://www.gstatic.com/firebasejs/12.6.0/firebase-storage.js";
+    import { getStorage, ref as storageRef, uploadBytes, getBytes, list, listAll, getMetadata } from "https://www.gstatic.com/firebasejs/12.6.0/firebase-storage.js";
 
     const firebaseConfig = {
       apiKey: "AIzaSyBS-g5bFBaJ6a35hWmjvoN-s8FuMEuxtew",
@@ -194,6 +194,7 @@
     window.getBytes = getBytes;
     window.storageList = list;
     window.storageListAll = listAll;
+    window.getMetadata = getMetadata;
   </script>
 
   <script src="ui-modals.js"></script>
@@ -617,6 +618,89 @@
         return str;
       };
 
+      // Helper: Detect file type from URL or filename
+      const getFileType = (url) => {
+        if (!url) return 'unknown';
+        const urlStr = String(url).toLowerCase();
+        if (urlStr.includes('.pdf') || urlStr.includes('pdf')) return 'pdf';
+        if (urlStr.includes('.png') || urlStr.includes('.jpg') || urlStr.includes('.jpeg') || urlStr.includes('.gif') || urlStr.includes('.webp')) return 'image';
+        if (urlStr.includes('.doc') || urlStr.includes('.docx')) return 'document';
+        return 'file';
+      };
+
+      // Helper: Get file name from URL (extract filename from path)
+      const getFileNameFromUrl = (url) => {
+        if (!url) return 'document';
+        try {
+          const urlObj = new URL(url);
+          const pathname = urlObj.pathname || '';
+          // Last path segment may be an encoded path like "drivers%2F2%2Ffile.pdf".
+          let filename = pathname.substring(pathname.lastIndexOf('/') + 1) || '';
+          // Decode URL-encoded characters (so drivers%2F2%2Ffile.pdf -> drivers/2/file.pdf)
+          filename = decodeURIComponent(filename);
+          // If there are slashes after decoding, take the basename
+          if (filename.includes('/')) {
+            filename = filename.substring(filename.lastIndexOf('/') + 1);
+          }
+          return filename || 'document';
+        } catch (e) {
+          return 'document';
+        }
+      };
+
+      // Helper: Map driver document URL fields to document types
+      const getDocumentsFromDriver = (drv) => {
+        if (!drv) return {};
+        
+        const docs = {};
+        
+        // Map DriversLicenseUrl to license
+        if (drv.DriversLicenseUrl) {
+          docs.license = {
+            documentType: 'license',
+            downloadUrl: drv.DriversLicenseUrl,
+            fileName: getFileNameFromUrl(drv.DriversLicenseUrl) || 'drivers-license',
+            fileType: getFileType(drv.DriversLicenseUrl),
+            uploadedAt: drv.DriversLicenseUploadedAt || null
+          };
+        }
+        
+        // Map NbiClearanceUrl to nbi
+        if (drv.NbiClearanceUrl) {
+          docs.nbi = {
+            documentType: 'nbi',
+            downloadUrl: drv.NbiClearanceUrl,
+            fileName: getFileNameFromUrl(drv.NbiClearanceUrl) || 'nbi-clearance',
+            fileType: getFileType(drv.NbiClearanceUrl),
+            uploadedAt: drv.NbiClearanceUploadedAt || null
+          };
+        }
+        
+        // Map QcIdUrl to qc
+        if (drv.QcIdUrl) {
+          docs.qc = {
+            documentType: 'qc',
+            downloadUrl: drv.QcIdUrl,
+            fileName: getFileNameFromUrl(drv.QcIdUrl) || 'qc-id',
+            fileType: getFileType(drv.QcIdUrl),
+            uploadedAt: drv.QcIdUploadedAt || null
+          };
+        }
+        
+        // Map DrugTestUrl to drug
+        if (drv.DrugTestUrl) {
+          docs.drug = {
+            documentType: 'drug',
+            downloadUrl: drv.DrugTestUrl,
+            fileName: getFileNameFromUrl(drv.DrugTestUrl) || 'drug-test',
+            fileType: getFileType(drv.DrugTestUrl),
+            uploadedAt: drv.DrugTestUploadedAt || null
+          };
+        }
+        
+        return docs;
+      };
+
       const openModal = (index) => {
         // Prefill the modal with applicant values. If this row is backed by a drivers/<id> record,
         // prefer canonical driver/user values so edits can be persisted back to drivers/users.
@@ -701,14 +785,22 @@
         } catch (e) { base.displayStatus = base.ApplicationStatus || 'TO REVIEW'; }
 
         // Load documents from Realtime Database if driver has documents node
+        // Also load from driver URL fields (DriversLicenseUrl, NbiclearanceUrl, QcIdUrl, DrugTestUrl)
         try {
           if (base.drvId && rawDrivers && rawDrivers[String(base.drvId)]) {
             const drv = rawDrivers[String(base.drvId)];
+            
+            // First, get documents from the documents node (if it exists)
+            let docs = {};
             if (drv.documents) {
-              base.documents = drv.documents;
-            } else {
-              base.documents = {};
+              docs = { ...drv.documents };
             }
+            
+            // Then, merge in documents from driver URL fields (these will override or complement)
+            const docsFromUrls = getDocumentsFromDriver(drv);
+            docs = { ...docs, ...docsFromUrls };
+            
+            base.documents = docs;
           } else {
             base.documents = {};
           }
@@ -1605,7 +1697,6 @@
                     <thead>
                       <tr className="bg-[#252d42]">
                         <th className="px-6 py-4 text-left text-white font-semibold">Requirement</th>
-                        <th className="px-6 py-4 text-left text-white font-semibold">Status</th>
                         <th className="px-6 py-4 text-left text-white font-semibold">Date Submitted</th>
                         <th className="px-6 py-4 text-left text-white font-semibold">File</th>
                       </tr>
@@ -1941,13 +2032,84 @@
 
     const FileRow = ({ requirement, documentType, driverId, doc, missing }) => {
       // documentType: 'license', 'nbi', 'qc', 'drug'
-      // doc: { documentType, uploadedAt, fileName, storagePath, downloadUrl, size }
+      // doc: { documentType, fileName, downloadUrl, size, fileType }
+      const [modifiedDate, setModifiedDate] = React.useState('Fetching...');
+      
+      // Fetch file metadata from Firebase Storage to get the modified date
+      React.useEffect(() => {
+        if (!doc || !doc.downloadUrl) return;
+        
+        const fetchFileMetadata = async () => {
+          try {
+            // Parse the download URL to extract the storage path
+            const url = new URL(doc.downloadUrl);
+            // Firebase storage URL format: https://firebasestorage.googleapis.com/v0/b/{bucket}/o/{path}?alt=media&token={token}
+            const pathMatch = url.pathname.match(/\/o\/(.*?)(?:\?|$)/);
+            if (!pathMatch) {
+              setModifiedDate('N/A');
+              return;
+            }
+            
+            const storagePath = decodeURIComponent(pathMatch[1]);
+            
+            // Import and use getMetadata from Firebase Storage
+            // Note: This requires getMetadata to be available from the Firebase SDK
+            try {
+              // Dynamically import getMetadata if not already available
+              if (window.getMetadata) {
+                const fileRef = window.storageRef(window.storage, storagePath);
+                const metadata = await window.getMetadata(fileRef);
+                
+                if (metadata && metadata.timeCreated) {
+                  const uploadDate = new Date(metadata.timeCreated).toLocaleDateString();
+                  setModifiedDate(uploadDate);
+                } else if (metadata && metadata.updated) {
+                  const uploadDate = new Date(metadata.updated).toLocaleDateString();
+                  setModifiedDate(uploadDate);
+                } else {
+                  setModifiedDate('N/A');
+                }
+              } else {
+                // Fallback: try to fetch metadata via REST API
+                const bucket = 'pasakay-project-ph.firebasestorage.app';
+                const metadataUrl = `https://www.googleapis.com/storage/v1/b/${bucket}/o/${encodeURIComponent(storagePath)}?alt=json&key=${window.firebaseApiKey}`;
+                
+                const response = await fetch(metadataUrl);
+                if (!response.ok) {
+                  console.warn('Failed to fetch metadata via REST API');
+                  setModifiedDate('N/A');
+                  return;
+                }
+                
+                const metadata = await response.json();
+                if (metadata && metadata.timeCreated) {
+                  const uploadDate = new Date(metadata.timeCreated).toLocaleDateString();
+                  setModifiedDate(uploadDate);
+                } else if (metadata && metadata.updated) {
+                  const uploadDate = new Date(metadata.updated).toLocaleDateString();
+                  setModifiedDate(uploadDate);
+                } else {
+                  setModifiedDate('N/A');
+                }
+              }
+            } catch (metadataErr) {
+              console.warn('Error fetching Firebase Storage metadata:', metadataErr);
+              setModifiedDate('N/A');
+            }
+          } catch (err) {
+            console.warn('Failed to parse file URL or fetch metadata:', err);
+            setModifiedDate('N/A');
+          }
+        };
+        
+        fetchFileMetadata();
+      }, [doc]);
       
       if (missing || !doc) {
         return (
           <tr className="bg-[#151b28] hover:bg-[#1a202e]">
             <td className="px-6 py-4 text-gray-300 font-medium">{requirement}</td>
-            <td className="px-6 py-4 text-center" colSpan="3">
+            <td className="px-6 py-4 text-center" colSpan="2">
               <div className="flex items-center justify-center gap-2">
                 <span className="bg-red-600 px-4 py-2 rounded-lg text-sm font-bold text-white">NOT SUBMITTED</span>
               </div>
@@ -1956,31 +2118,221 @@
         );
       }
 
-      const uploadDate = doc.uploadedAt ? new Date(doc.uploadedAt).toLocaleDateString() : 'N/A';
       const fileSize = doc.size ? (doc.size / 1024 / 1024).toFixed(2) + ' MB' : 'Unknown';
+      const fileType = doc.fileType || getFileType(doc.downloadUrl || doc.fileName || '');
+      
+      // Determine icon based on file type
+      const getFileIcon = () => {
+        switch(fileType) {
+          case 'pdf':
+            return (
+              <svg className="w-6 h-6 text-red-500" fill="currentColor" viewBox="0 0 20 20">
+                <path d="M4 3a2 2 0 00-2 2v10a2 2 0 002 2h12a2 2 0 002-2V5a2 2 0 00-2-2H4zm9 8a1 1 0 11-2 0 1 1 0 012 0zm-4 2a1 1 0 100-2 1 1 0 000 2zm8-2a1 1 0 11-2 0 1 1 0 012 0z"/>
+              </svg>
+            );
+          case 'image':
+            return (
+              <svg className="w-6 h-6 text-blue-500" fill="currentColor" viewBox="0 0 20 20">
+                <path fillRule="evenodd" d="M4 3a2 2 0 00-2 2v10a2 2 0 002 2h12a2 2 0 002-2V5a2 2 0 00-2-2H4zm12 12H4l4-8 3 6 2-4 3 6z" clipRule="evenodd"/>
+              </svg>
+            );
+          case 'document':
+            return (
+              <svg className="w-6 h-6 text-green-500" fill="currentColor" viewBox="0 0 20 20">
+                <path d="M4 4a2 2 0 012-2h4.586A2 2 0 0112 2.586L15.414 6A2 2 0 0116 7.414V16a2 2 0 01-2 2H6a2 2 0 01-2-2V4z"/>
+              </svg>
+            );
+          default:
+            return (
+              <svg className="w-6 h-6 text-gray-400" fill="currentColor" viewBox="0 0 20 20">
+                <path d="M4 4a2 2 0 012-2h4.586A2 2 0 0112 2.586L15.414 6A2 2 0 0116 7.414V16a2 2 0 01-2 2H6a2 2 0 01-2-2V4z"/>
+              </svg>
+            );
+        }
+      };
+
+      const displayName = doc.fileName || getFileNameFromUrl(doc.downloadUrl || '');
+
+      // Helper: show a modal preview (image or PDF) with zoom and pan support
+      const showPreview = (url, type) => {
+        if (!url) return;
+        let modal = document.getElementById('file-preview-modal');
+        if (!modal) {
+          modal = document.createElement('div');
+          modal.id = 'file-preview-modal';
+          modal.style.position = 'fixed';
+          modal.style.inset = '0';
+          modal.style.display = 'flex';
+          modal.style.alignItems = 'center';
+          modal.style.justifyContent = 'center';
+          modal.style.background = 'rgba(0,0,0,0.6)';
+          modal.style.zIndex = 9999;
+          modal.innerHTML = `
+            <div id="file-preview-container" style="background:#0b1220;padding:12px;border-radius:8px;max-width:90%;max-height:90%;box-shadow:0 10px 30px rgba(0,0,0,0.6);width:90%;">
+              <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px;gap:12px;">
+                <div style="color:#fef3c7;font-weight:600;">Preview</div>
+                <div id="file-preview-controls" style="display:flex;align-items:center;gap:8px;margin-left:8px;">
+                  <button id="zoom-out" style="background:#1f2937;border:none;padding:6px 8px;color:#fef3c7;border-radius:6px;cursor:pointer;">-</button>
+                  <div id="zoom-level" style="color:#fef3c7;min-width:48px;text-align:center;">100%</div>
+                  <button id="zoom-in" style="background:#1f2937;border:none;padding:6px 8px;color:#fef3c7;border-radius:6px;cursor:pointer;">+</button>
+                  <button id="zoom-reset" style="background:#111827;border:none;padding:6px 8px;color:#fef3c7;border-radius:6px;cursor:pointer;">Reset</button>
+                </div>
+                <button id="file-preview-close" style="background:transparent;border:none;color:#fef3c7;font-size:18px;cursor:pointer;">✕</button>
+              </div>
+              <div id="file-preview-body" style="width:100%;height:80vh;display:flex;align-items:center;justify-content:center;overflow:hidden;position:relative;border-radius:6px;background:#000;"></div>
+            </div>
+          `;
+          document.body.appendChild(modal);
+          document.getElementById('file-preview-close').addEventListener('click', () => { modal.remove(); });
+          modal.addEventListener('click', (ev) => {
+            if (ev.target === modal) modal.remove();
+          });
+        }
+
+        const body = modal.querySelector('#file-preview-body');
+        body.innerHTML = '';
+
+        // State for zoom/pan stored on modal element
+        modal._scale = modal._scale || 1;
+        modal._translateX = modal._translateX || 0;
+        modal._translateY = modal._translateY || 0;
+
+        const controls = modal.querySelector('#file-preview-controls');
+        const zoomLevel = modal.querySelector('#zoom-level');
+
+        const setZoomDisplay = (s) => { if (zoomLevel) zoomLevel.textContent = Math.round(s * 100) + '%'; };
+        setZoomDisplay(modal._scale);
+
+        const createInnerWrapper = () => {
+          const inner = document.createElement('div');
+          inner.id = 'file-preview-inner';
+          inner.style.transition = 'transform 120ms ease';
+          inner.style.willChange = 'transform';
+          inner.style.cursor = 'grab';
+          inner.style.display = 'flex';
+          inner.style.alignItems = 'center';
+          inner.style.justifyContent = 'center';
+          inner.style.minWidth = '100%';
+          inner.style.minHeight = '100%';
+          inner.style.position = 'absolute';
+          inner.style.left = '0';
+          inner.style.top = '0';
+          inner.style.transformOrigin = 'center center';
+          return inner;
+        };
+
+        const inner = createInnerWrapper();
+        body.appendChild(inner);
+
+        let contentEl;
+        if (type === 'image') {
+          const img = document.createElement('img');
+          img.src = url;
+          img.alt = displayName;
+          img.style.maxWidth = '100%';
+          img.style.maxHeight = '80vh';
+          img.style.userSelect = 'none';
+          img.style.pointerEvents = 'none';
+          contentEl = img;
+          inner.appendChild(img);
+        } else {
+          const iframeWrap = document.createElement('div');
+          iframeWrap.style.width = '100%';
+          iframeWrap.style.height = '100%';
+          iframeWrap.style.display = 'flex';
+          iframeWrap.style.alignItems = 'center';
+          iframeWrap.style.justifyContent = 'center';
+          const iframe = document.createElement('iframe');
+          iframe.src = url;
+          iframe.style.width = '100%';
+          iframe.style.height = '100%';
+          iframe.style.border = 'none';
+          iframe.style.pointerEvents = 'auto';
+          contentEl = iframeWrap;
+          iframeWrap.appendChild(iframe);
+          inner.appendChild(iframeWrap);
+        }
+
+        const applyTransform = () => {
+          inner.style.transform = `translate(${modal._translateX}px, ${modal._translateY}px) scale(${modal._scale})`;
+          setZoomDisplay(modal._scale);
+        };
+
+        // Zoom controls
+        const zoomIn = () => { modal._scale = Math.min(5, modal._scale + 0.1); applyTransform(); };
+        const zoomOut = () => { modal._scale = Math.max(0.2, modal._scale - 0.1); applyTransform(); };
+        const zoomReset = () => { modal._scale = 1; modal._translateX = 0; modal._translateY = 0; applyTransform(); };
+
+        // Attach control handlers (avoid duplicate listeners)
+        if (controls) {
+          const inBtn = modal.querySelector('#zoom-in');
+          const outBtn = modal.querySelector('#zoom-out');
+          const resetBtn = modal.querySelector('#zoom-reset');
+          if (inBtn && !inBtn._bound) { inBtn.addEventListener('click', zoomIn); inBtn._bound = true; }
+          if (outBtn && !outBtn._bound) { outBtn.addEventListener('click', zoomOut); outBtn._bound = true; }
+          if (resetBtn && !resetBtn._bound) { resetBtn.addEventListener('click', zoomReset); resetBtn._bound = true; }
+        }
+
+        // Wheel to zoom
+        const wheelHandler = (ev) => {
+          ev.preventDefault();
+          const delta = ev.deltaY || ev.wheelDelta;
+          if (delta > 0) zoomOut(); else zoomIn();
+        };
+        if (!modal._wheelBound) { body.addEventListener('wheel', wheelHandler, { passive: false }); modal._wheelBound = true; }
+
+        // Drag to pan
+        let dragging = false; let startX = 0; let startY = 0;
+        const pointerDown = (e) => { dragging = true; inner.style.cursor = 'grabbing'; startX = e.clientX; startY = e.clientY; e.preventDefault(); };
+        const pointerMove = (e) => {
+          if (!dragging) return;
+          const dx = e.clientX - startX; const dy = e.clientY - startY; startX = e.clientX; startY = e.clientY;
+          modal._translateX += dx; modal._translateY += dy; applyTransform();
+        };
+        const pointerUp = () => { dragging = false; inner.style.cursor = 'grab'; };
+        if (!inner._pointerBound) {
+          inner.addEventListener('pointerdown', pointerDown);
+          window.addEventListener('pointermove', pointerMove);
+          window.addEventListener('pointerup', pointerUp);
+          inner._pointerBound = true;
+        }
+
+        // Apply initial transform
+        applyTransform();
+      };
 
       return (
         <tr className="bg-[#151b28] hover:bg-[#1a202e]">
           <td className="px-6 py-4 text-gray-300 font-medium">{requirement}</td>
-          <td className="px-6 py-4 text-gray-400">-</td>
-          <td className="px-6 py-4 text-gray-400">{uploadDate}</td>
+          <td className="px-6 py-4 text-gray-400">{modifiedDate}</td>
           <td className="px-6 py-4">
             {doc.downloadUrl ? (
-              <a
-                href={doc.downloadUrl}
-                target="_blank"
-                rel="noopener noreferrer"
-                className="flex items-center gap-3 text-yellow-500 hover:text-yellow-400 transition-colors"
-                title={`Download ${doc.fileName}`}
-              >
-                <svg className="w-6 h-6" fill="currentColor" viewBox="0 0 20 20">
-                  <path d="M4 4a2 2 0 012-2h4.586A2 2 0 0112 2.586L15.414 6A2 2 0 0116 7.414V16a2 2 0 01-2 2H6a2 2 0 01-2-2V4z"/>
-                </svg>
-                <div>
-                  <div className="font-medium text-sm">{doc.fileName || `${requirement}.jpg`}</div>
-                  <div className="text-xs text-gray-400">{fileSize}</div>
+              <div className="flex items-center justify-between">
+                <div className="flex items-center gap-3 text-yellow-500">
+                  {getFileIcon()}
+                  <div>
+                    <div className="font-medium text-sm">{displayName || `${requirement}.file`}</div>
+                    {fileSize !== 'Unknown' ? (
+                      <div className="text-xs text-gray-400">{fileSize}</div>
+                    ) : null}
+                  </div>
                 </div>
-              </a>
+
+                <div className="flex items-center gap-2">
+                  <button
+                    type="button"
+                    title={`Preview ${displayName}`}
+                    className="p-2 rounded hover:bg-gray-800 text-gray-200"
+                    onClick={(e) => { e.preventDefault(); showPreview(doc.downloadUrl, fileType); }}
+                  >
+                    {/* Eye icon */}
+                    <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z" />
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M2.458 12C3.732 7.943 7.523 5 12 5c4.477 0 8.268 2.943 9.542 7-1.274 4.057-5.065 7-9.542 7-4.477 0-8.268-2.943-9.542-7z" />
+                    </svg>
+                  </button>
+                </div>
+              </div>
             ) : (
               <span className="text-gray-400 text-sm">URL unavailable</span>
             )}
