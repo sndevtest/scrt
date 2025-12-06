@@ -97,6 +97,17 @@
       const [selectedPassenger, setSelectedPassenger] = React.useState(null);
       const [selectedBooking, setSelectedBooking] = React.useState(null);
 
+      // Hash function to convert Firebase keys to integers
+      const hashKeyToInt = (key) => {
+        let hash = 0;
+        for (let i = 0; i < key.length; i++) {
+          const char = key.charCodeAt(i);
+          hash = ((hash << 5) - hash) + char;
+          hash = hash & hash; // Convert to 32-bit integer
+        }
+        return Math.abs(hash); // Return positive integer
+      };
+
       // Helper: strip +63 prefix for display
       const stripPhonePrefix = (phone) => {
         if (!phone) return '';
@@ -124,7 +135,7 @@
         const usersRef = window.dbRef(window.db, 'users');
         const driversRef = window.dbRef(window.db, 'drivers');
         const passengersRef = window.dbRef(window.db, 'passengers');
-        const bookingsRef = window.dbRef(window.db, 'booking');
+        const bookingsRef = window.dbRef(window.db, 'bookings');
         const feedbackRef = window.dbRef(window.db, 'feedback');
 
         const unsubUsers = window.dbOnValue(usersRef, snap => {
@@ -206,16 +217,16 @@
           const date = requested ? new Date(requested).toLocaleDateString() : '';
           const time = requested ? new Date(requested).toLocaleTimeString([], {hour: '2-digit', minute:'2-digit'}) : '';
           return {
-            id: key,
-            passenger: passengerUser ? makeFullName(passengerUser) : (b.PassengerName || 'Passenger'),
+            id: parseInt(key) || hashKeyToInt(key),
+            passenger: b.userName || 'Passenger',
             driver: driverUser ? makeFullName(driverUser) : (driverUser ? makeFullName(driverUser) : 'Driver'),
-            pickup: b.PickUpLocation || b.pickup || '',
-            dropoff: b.DropOffLocation || b.dropoff || '',
+            pickup: b.PickupLocation || b.pickup || '',
+            dropoff: b.DropoffLocation || b.dropoff || '',
             fare: typeof b.TotalFare !== 'undefined' ? `₱${Number(b.TotalFare).toFixed(2)}` : (b.fare || ''),
             date,
             time,
-            status: b.Status || 'Unknown',
-            distance: b.DistanceKm ? `${b.DistanceKm}km` : (b.distance || ''),
+            status: (b.Status || 'Unknown').charAt(0).toUpperCase() + (b.Status || 'Unknown').slice(1).toLowerCase(),
+            distance: b.distanceKm ? `${b.distanceKm}km` : (b.DistanceKm ? `${b.DistanceKm}km` : (b.distance || '')),
             raw: b
           };
         }).sort((a,b) => {

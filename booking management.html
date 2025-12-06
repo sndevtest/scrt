@@ -96,6 +96,17 @@
       const [rawPassengers, setRawPassengers] = React.useState({});
       const [rawBookings, setRawBookings] = React.useState({});
 
+      // Hash function to convert Firebase keys to integers
+      const hashKeyToInt = (key) => {
+        let hash = 0;
+        for (let i = 0; i < key.length; i++) {
+          const char = key.charCodeAt(i);
+          hash = ((hash << 5) - hash) + char;
+          hash = hash & hash; // Convert to 32-bit integer
+        }
+        return Math.abs(hash); // Return positive integer
+      };
+
       // Derived arrays for UI
       const [allBookings, setAllBookings] = React.useState([]);
       const [filteredBookings, setFilteredBookings] = React.useState([]);
@@ -164,16 +175,16 @@
           }
 
           return {
-            id: key,
-            passenger: passengerUser ? makeFullName(passengerUser) : 'Passenger',
-            pickup: b.PickUpLocation || '',
-            destination: b.DropOffLocation || '',
+            id: parseInt(key) || hashKeyToInt(key),
+            passenger: b.userName || 'Passenger',
+            pickup: b.PickupLocation || '',
+            destination: b.DropoffLocation || '',
             fare: b.TotalFare || 0,
-            status: b.Status || 'Unknown',
+            status: (b.Status || 'Unknown').charAt(0).toUpperCase() + (b.Status || 'Unknown').slice(1).toLowerCase(),
             driver: driverName,
             driverTricycle,
             driverLicense,
-            distance: b.DistanceKm ? `${b.DistanceKm}km` : '',
+            distance: b.distanceKm ? `${b.distanceKm}km` : '',
             date,
             time
           };
