@@ -400,6 +400,7 @@
             return uid;
           } else {
             console.warn('ensureAuthForUser: createAuthUser returned null/falsy');
+            if (window.showAlert) window.showAlert('Failed to create Firebase Auth user. Check console for Identity Toolkit response and ensure Email/Password sign-in is enabled in Firebase Console.', 'error');
           }
           return null;
         } catch (e) {
@@ -1211,25 +1212,18 @@
           await window.dbSet(userRef, userPayload);
           console.log('approveAndAdd: user written to DB');
 
-          // Create Firebase Auth account immediately with the email/password we just wrote
-          // Do this in parallel with other operations (don't wait for DB propagation)
+          // Ensure Firebase Auth account exists for this user via helper
+          // This centralizes Auth creation and persists `AuthUID` to the DB.
           try {
-            console.log('approveAndAdd: creating Firebase Auth account for', userPayload.Email);
-            const authUid = await createAuthUser(userPayload.Email, userPayload.Password);
+            console.log('approveAndAdd: ensuring Firebase Auth account for', userPayload.Email);
+            const authUid = await ensureAuthForUser(userId);
             if (authUid) {
-              console.log('approveAndAdd: Auth account created successfully, UID =', authUid);
-              // Write the Auth UID back to the user record
-              try {
-                await window.dbUpdate(userRef, { AuthUID: authUid });
-                console.log('approveAndAdd: AuthUID persisted to user record');
-              } catch(e) {
-                console.warn('approveAndAdd: failed to persist AuthUID to DB', e);
-              }
+              console.log('approveAndAdd: Auth account ensured, UID =', authUid);
             } else {
-              console.warn('approveAndAdd: createAuthUser returned null/falsy');
+              console.warn('approveAndAdd: ensureAuthForUser returned null/falsy');
             }
           } catch(e) {
-            console.warn('approveAndAdd: Auth account creation error', e);
+            console.warn('approveAndAdd: Auth account ensure error', e);
           }
 
           const driverId = await claimSmallestNumericId('drivers');
@@ -1805,25 +1799,18 @@
           await window.dbSet(userRef, userObj);
           console.log('AddSimpleDriverForm: applicant written to DB');
 
-          // Create Firebase Auth account immediately with the email/password we just wrote
-          // Do this in parallel with other operations (don't wait for DB propagation)
+          // Ensure Firebase Auth account exists for this applicant via helper
+          // This centralizes Auth creation and persists `AuthUID` to the DB.
           try {
-            console.log('AddSimpleDriverForm: creating Firebase Auth account for', userObj.Email);
-            const authUid = await createAuthUser(userObj.Email, userObj.Password);
+            console.log('AddSimpleDriverForm: ensuring Firebase Auth account for', userObj.Email);
+            const authUid = await ensureAuthForUser(userId);
             if (authUid) {
-              console.log('AddSimpleDriverForm: Auth account created successfully, UID =', authUid);
-              // Write the Auth UID back to the user record
-              try {
-                await window.dbUpdate(userRef, { AuthUID: authUid });
-                console.log('AddSimpleDriverForm: AuthUID persisted to user record');
-              } catch(e) {
-                console.warn('AddSimpleDriverForm: failed to persist AuthUID to DB', e);
-              }
+              console.log('AddSimpleDriverForm: Auth account ensured, UID =', authUid);
             } else {
-              console.warn('AddSimpleDriverForm: createAuthUser returned null/falsy');
+              console.warn('AddSimpleDriverForm: ensureAuthForUser returned null/falsy');
             }
           } catch(e) {
-            console.warn('AddSimpleDriverForm: Auth account creation error', e);
+            console.warn('AddSimpleDriverForm: Auth account ensure error', e);
           }
 
           // Also create a drivers/ record for this applicant (IsApplying: true, ApplicationStatus: TO REVIEW)

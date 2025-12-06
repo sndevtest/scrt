@@ -8,7 +8,9 @@
 
   <script type="module">
     import { initializeApp } from "https://www.gstatic.com/firebasejs/12.6.0/firebase-app.js";
-    import { getAuth, signInAnonymously, onAuthStateChanged } from "https://www.gstatic.com/firebasejs/12.6.0/firebase-auth.js";
+    // Note: We intentionally do NOT sign in anonymously on this page.
+    // Auth account creation should only happen from `Driver application.html` (membership flow).
+    import { getAuth, onAuthStateChanged } from "https://www.gstatic.com/firebasejs/12.6.0/firebase-auth.js";
     import {
       getDatabase,
       ref,
@@ -42,10 +44,9 @@
     const db = getDatabase(app);
     const storage = getStorage(app);
 
-    // Sign in anonymously for Storage/Database operations
-    signInAnonymously(auth).catch(err => {
-      console.error('Anonymous sign-in failed:', err);
-    });
+    // Deliberately not signing in anonymously here to avoid creating
+    // anonymous Firebase Auth user accounts. Use the membership flow
+    // (`Driver application.html`) to create Auth users when needed.
 
     // Monitor auth state
     onAuthStateChanged(auth, (user) => {
