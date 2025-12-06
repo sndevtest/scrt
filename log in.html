@@ -49,7 +49,13 @@
             const auth = window.firebaseAuth;
             const userCredential = await window.signInWithEmailAndPassword(auth, formData.username, formData.password);
             console.log("Logged in:", userCredential.user);
-            window.location.href = "dashboard.html"; // redirect to dashboard
+            
+            // Check user role in database to determine redirect
+            if (window.checkUserRoleAndRedirect) {
+              await window.checkUserRoleAndRedirect(userCredential.user);
+            } else {
+              window.location.href = "dashboard.html"; // fallback redirect
+            }
           } catch (error) {
             console.error("Auth error:", error.message);
             window.showAlert("Login failed: " + " Invalid credentials. Please try again.", 'error');
@@ -186,7 +192,113 @@
     window.firebaseAuth = auth;
     window.signInWithEmailAndPassword = signInWithEmailAndPassword;
 
-    // Remove the old button click listener since we're handling it in React now
+    // Role constants
+    const ROLE_IDS = {
+      TODA_OFFICER: '1',
+      DRIVER: '2',
+      PASSENGER: '3',
+      ADMIN: '4'
+    };
+
+    // Function: Check user role and redirect to appropriate dashboard
+    window.checkUserRoleAndRedirect = async (user) => {
+      try {
+        // user can be either a uid string (legacy) or the full user object from Firebase Auth
+        const userEmail = (typeof user === 'string') ? null : user.email;
+        const uid = (typeof user === 'string') ? user : user.uid;
+        
+        console.log('🔍 Looking up user:', userEmail || uid);
+        
+        const usersRef = ref(db, 'users');
+        const usersSnap = await get(usersRef);
+        const usersData = usersSnap.val() || {};
+
+        // Find user by Email (primary) or UID (fallback)
+        let userRoleID = null;
+        let userName = '';
+        let foundUser = null;
+        
+        for (const [userId, userObj] of Object.entries(usersData)) {
+          // Try to match by email first (more reliable)
+          if (userEmail && userObj && userObj.Email && userObj.Email.toLowerCase() === userEmail.toLowerCase()) {
+            foundUser = userObj;
+            userName = userObj.Firstname || 'User';
+            
+            // Try to get RoleID - check multiple possible field names
+            userRoleID = userObj.RoleID || userObj.RoleId || userObj.roleId || null;
+            
+            // If no RoleID found, it may be stored as a role name
+            if (!userRoleID && userObj.Role) {
+              // Map role names to IDs if needed
+              const roleMap = {
+                'TODA Officer': '1',
+                'Driver': '2',
+                'Passenger': '3',
+                'Admin': '4'
+              };
+              userRoleID = roleMap[userObj.Role] || userObj.Role;
+            }
+            
+            console.log('✅ Found user by Email:', userName, 'RoleID:', userRoleID);
+            break;
+          }
+          // Fallback: try to match by UID
+          else if (userObj && userObj.UID === uid) {
+            foundUser = userObj;
+            userName = userObj.Firstname || 'User';
+            userRoleID = userObj.RoleID || userObj.RoleId || userObj.roleId || null;
+            
+            if (!userRoleID && userObj.Role) {
+              const roleMap = {
+                'TODA Officer': '1',
+                'Driver': '2',
+                'Passenger': '3',
+                'Admin': '4'
+              };
+              userRoleID = roleMap[userObj.Role] || userObj.Role;
+            }
+            
+            console.log('✅ Found user by UID:', userName, 'RoleID:', userRoleID);
+            break;
+          }
+        }
+
+        if (!userRoleID || !foundUser) {
+          console.error('❌ User not found in database or no role assigned. Email:', userEmail, 'UID:', uid);
+          console.error('🔍 Available users:', Object.keys(usersData).length);
+          window.showAlert('User role not found. Please contact administrator.', 'error');
+          return;
+        }
+
+        userRoleID = String(userRoleID);
+        console.log(`🔐 User ${userName} logged in with RoleID: ${userRoleID}`);
+
+        // Store user info in sessionStorage for use in other pages
+        sessionStorage.setItem('userUID', uid);
+        sessionStorage.setItem('userRole', userRoleID);
+        sessionStorage.setItem('userName', userName);
+
+        // Route based on role
+        console.log(`🔍 Role comparison - userRoleID: "${userRoleID}" (${typeof userRoleID}), ADMIN: "${ROLE_IDS.ADMIN}" (${typeof ROLE_IDS.ADMIN}), TODA_OFFICER: "${ROLE_IDS.TODA_OFFICER}" (${typeof ROLE_IDS.TODA_OFFICER})`);
+        
+        if (String(userRoleID) === String(ROLE_IDS.ADMIN)) {
+          // Admin goes to Driver Application page
+          console.log('🔔 Redirecting to Driver Application...');
+          window.location.href = 'Driver application.html';
+        } else if (String(userRoleID) === String(ROLE_IDS.TODA_OFFICER)) {
+          // TODA Officer goes to TODA Officer dashboard
+          console.log('🔔 Redirecting to TODA Officer Dashboard...');
+          window.location.href = 'toda-officer-dashboard.html';
+        } else {
+          // Other roles: show error
+          console.error('❌ Role not authorized for admin panel. RoleID:', userRoleID);
+          window.showAlert('Your role does not have access to this admin panel. (RoleID: ' + userRoleID + ')', 'error');
+        }
+      } catch (error) {
+        console.error('Error checking user role:', error);
+        window.showAlert('Error verifying user role. Please try again.', 'error');
+      }
+    };
   </script>
 </body>
 </html>
