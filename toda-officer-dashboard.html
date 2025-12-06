@@ -247,6 +247,7 @@
       const [members, setMembers] = React.useState([]);
       const [auditLogs, setAuditLogs] = React.useState([]);
       const [searchTerm, setSearchTerm] = React.useState('');
+      const [auditSearchTerm, setAuditSearchTerm] = React.useState('');
 
       // Modal & selection state for membership review
       const [showModal, setShowModal] = React.useState(false);
@@ -876,7 +877,7 @@
         if (statusStr.includes('ADDED')) return 'bg-blue-600';
         const baseStatus = statusStr.split(/[\s\-]/)[0];
         switch(baseStatus) {
-          case 'TO': return 'bg-yellow-500';
+          case 'TO REVIEW': return 'bg-yellow-500';
           case 'APPROVED': return 'bg-green-500';
           case 'EXPIRED': return 'bg-red-500';
           case 'REJECTED': return 'bg-red-500';
@@ -1003,30 +1004,103 @@
         setMembers(items);
       }, [rawDrivers, rawUsers]);
 
-      // Load audit logs (simulated - in real scenario, this would come from a dedicated logs collection)
+      // Audit logs state
+      const [auditRawDrivers, setAuditRawDrivers] = React.useState({});
+      const [auditRawUsers, setAuditRawUsers] = React.useState({});
+      const [auditDriversMap, setAuditDriversMap] = React.useState({});
+
+      // Load drivers and users map for audit logs (similar to Logs.html)
       React.useEffect(() => {
         if (!window.db || !window.dbRef || !window.dbOnValue) return;
+        const driversRef = window.dbRef(window.db, 'drivers');
+        const usersRef = window.dbRef(window.db, 'users');
 
-        const logsRef = window.dbRef(window.db, 'audit_logs');
-        const unsubscribe = window.dbOnValue(logsRef, snap => {
-          try {
-            const logsData = snap.val() || {};
-            const logList = Object.entries(logsData)
-              .map(([logId, log]) => ({
-                id: logId,
-                ...log
-              }))
-              .sort((a, b) => new Date(b.timestamp || 0) - new Date(a.timestamp || 0))
-              .slice(0, 100); // Last 100 logs
-            
-            setAuditLogs(logList);
-          } catch(err) {
-            console.error('Error loading audit logs:', err);
-          }
+        const unsubDrivers = window.dbOnValue(driversRef, snap => {
+          const val = snap.val() || {};
+          setAuditRawDrivers(val);
+          const driverMap = {};
+          Object.entries(val).forEach(([driverId, driver]) => {
+            driverMap[driverId] = driver.name || driver.Name || '';
+          });
+          setAuditDriversMap(driverMap);
         });
 
-        return () => unsubscribe();
+        const unsubUsers = window.dbOnValue(usersRef, snap => {
+          const val = snap.val() || {};
+          setAuditRawUsers(val);
+        });
+
+        const unsub = () => { try { unsubDrivers(); } catch(e) {} try { unsubUsers(); } catch(e) {} };
+        return () => { try { unsub(); } catch(e) {} };
       }, []);
+
+      // Listen to audit logs from Realtime Database
+      React.useEffect(() => {
+        if (!window.db || !window.dbRef || !window.dbOnValue) return;
+        const logsRef = window.dbRef(window.db, 'auditLogs');
+        const unsub = window.dbOnValue(logsRef, snap => {
+          const val = snap.val() || {};
+          const items = Object.entries(val).map(([key, log], index) => {
+            const driverId = log.DriverID || '';
+            let driverName = '';
+            try {
+              const drv = auditRawDrivers && auditRawDrivers[driverId];
+              if (drv && drv.UserID && auditRawUsers && auditRawUsers[drv.UserID]) {
+                const u = auditRawUsers[drv.UserID];
+                driverName = [u.Firstname, u.Middlename, u.Lastname].filter(Boolean).join(' ');
+              }
+              if (!driverName && drv) {
+                driverName = drv.Name || drv.name || drv.FullName || '';
+              }
+              if (!driverName) driverName = log.DriverName || log.driver || driverId || 'Unknown Driver';
+            } catch (e) {
+              driverName = log.DriverName || log.driver || driverId || 'Unknown Driver';
+            }
+            
+            const formatDate = (timestamp) => {
+              if (!timestamp) return '';
+              const date = new Date(timestamp);
+              const year = date.getFullYear();
+              const month = String(date.getMonth() + 1).padStart(2, '0');
+              const day = String(date.getDate()).padStart(2, '0');
+              return `${year}-${month}-${day}`;
+            };
+            
+            return {
+              id: `LOG${String(index + 1).padStart(3, '0')}`,
+              dbKey: key,
+              bookingId: log.BookingID || log.rideId || '',
+              driver: driverName,
+              driverId: driverId,
+              event: log.ViolationType || log.event || '',
+              location: log.Location || log.location || '',
+              timestamp: formatDate(log.ViolationTimestamp || log.timestamp || ''),
+              status: log.IsFlaggedForReview ? 'Flagged' : (log.status || 'Reviewed')
+            };
+          });
+          setAuditLogs(items);
+        });
+        return () => { try { unsub(); } catch(e) {} };
+      }, [auditRawDrivers, auditRawUsers]);
+
+      // Filter audit logs based on search term
+      const filteredAuditLogs = (auditLogs || []).filter(log =>
+        (log.id || '').toString().toLowerCase().includes(auditSearchTerm.toLowerCase()) ||
+        (log.bookingId || '').toString().toLowerCase().includes(auditSearchTerm.toLowerCase()) ||
+        (log.driver || '').toString().toLowerCase().includes(auditSearchTerm.toLowerCase()) ||
+        (log.event || '').toString().toLowerCase().includes(auditSearchTerm.toLowerCase()) ||
+        (log.location || '').toString().toLowerCase().includes(auditSearchTerm.toLowerCase()) ||
+        (log.status || '').toString().toLowerCase().includes(auditSearchTerm.toLowerCase())
+      );
+
+      // Handle audit log status change
+      const handleAuditStatusChange = (dbKey, currentStatus) => {
+        if (!window.db || !window.dbRef || !window.dbUpdate) return;
+        const newStatus = currentStatus === 'Flagged' ? false : true;
+        const logRef = window.dbRef(window.db, `auditLogs/${dbKey}`);
+        window.dbUpdate(logRef, { IsFlaggedForReview: newStatus })
+          .catch(err => console.error('Error updating status:', err));
+      };
 
       const handleLogout = async () => {
         try {
@@ -1131,7 +1205,7 @@
                 {/* Status Filter + Total */}
                 <div className="flex items-center justify-between">
                   <div className="flex gap-2">
-                    {['ALL', 'TO REVIEW', 'APPROVED', 'REJECTED', 'EXPIRED'].map(status => (
+                    {['ALL', 'ADDED', 'APPROVED', 'EXPIRED', 'REJECTED', 'TO REVIEW'].map(status => (
                       <button
                         key={status}
                         onClick={() => setStatusFilter(status)}
@@ -1335,10 +1409,10 @@
                             onChange={handleInputChange}
                             className="w-full px-4 py-3 rounded-lg bg-[#252d42] text-white border border-gray-700 focus:border-yellow-500 focus:outline-none"
                           >
-                            <option value="TO REVIEW">To Review</option>
                             <option value="APPROVED">Approved</option>
-                            <option value="REJECTED">Rejected</option>
                             <option value="EXPIRED">Expired</option>
+                            <option value="TO REVIEW">To Review</option>
+                            <option value="REJECTED">Rejected</option>
                           </select>
                         </div>
                       </div>
@@ -1395,49 +1469,72 @@
 
             {currentPage === 'audit' && (
               <div className="space-y-6">
-                <div>
-                  <h2 className="text-2xl font-bold text-white mb-4">Audit Logs</h2>
-                  
-                  {/* Logs Table */}
+                <header className="flex justify-between items-center mb-8">
+                  <h2 className="text-3xl font-bold text-white">Audit Logs</h2>
+                  <div className="flex items-center gap-4">
+                    <div className="relative">
+                      <svg className="w-5 h-5 absolute left-4 top-1/2 transform -translate-y-1/2 text-gray-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z" />
+                      </svg>
+                      <input
+                        type="text"
+                        placeholder="Search logs..."
+                        className="pl-12 pr-4 py-3 rounded-lg bg-[#252d42] text-white border border-gray-700 focus:border-yellow-500 focus:outline-none w-80"
+                        value={auditSearchTerm}
+                        onChange={(e) => setAuditSearchTerm(e.target.value)}
+                      />
+                    </div>
+                  </div>
+                </header>
+
+                {/* Audit Logs Table */}
+                <div className="bg-[#1e2538] p-8 rounded-xl">
+                  <h3 className="text-2xl font-bold mb-6 text-white">System Violation Reports</h3>
                   <div className="overflow-x-auto">
-                    <table className="w-full text-sm">
-                      <thead className="bg-[#151b28] border-b border-gray-700">
-                        <tr>
-                          <th className="px-6 py-3 text-left text-gray-400 font-semibold">Timestamp</th>
-                          <th className="px-6 py-3 text-left text-gray-400 font-semibold">User</th>
-                          <th className="px-6 py-3 text-left text-gray-400 font-semibold">Action</th>
-                          <th className="px-6 py-3 text-left text-gray-400 font-semibold">Details</th>
+                    <table className="w-full border-collapse">
+                      <thead>
+                        <tr className="bg-[#252d42]">
+                          <th className="px-6 py-4 text-left text-white font-semibold">Log ID</th>
+                          <th className="px-6 py-4 text-left text-white font-semibold">BookingID</th>
+                          <th className="px-6 py-4 text-left text-white font-semibold">Driver</th>
+                          <th className="px-6 py-4 text-left text-white font-semibold">Event</th>
+                          <th className="px-6 py-4 text-left text-white font-semibold">Location</th>
+                          <th className="px-6 py-4 text-left text-white font-semibold">Timestamp</th>
+                          <th className="px-6 py-4 text-left text-white font-semibold">Status</th>
                         </tr>
                       </thead>
                       <tbody>
-                        {auditLogs.length > 0 ? (
-                          auditLogs.map((log) => (
-                            <tr key={log.id} className="bg-[#151b28] hover:bg-[#1a202e] border-b border-gray-700">
-                              <td className="px-6 py-3 text-gray-300">
-                                {new Date(log.timestamp || 0).toLocaleString()}
-                              </td>
-                              <td className="px-6 py-3 text-gray-400">{log.user || 'System'}</td>
-                              <td className="px-6 py-3">
-                                <span className="px-3 py-1 rounded bg-yellow-900 text-yellow-200 text-xs font-medium">
-                                  {log.action || 'Unknown'}
-                                </span>
-                              </td>
-                              <td className="px-6 py-3 text-gray-400">{log.details || 'N/A'}</td>
-                            </tr>
-                          ))
-                        ) : (
-                          <tr className="bg-[#151b28]">
-                            <td colSpan="4" className="px-6 py-8 text-center text-gray-400">
-                              No audit logs available.
+                        {filteredAuditLogs.map((log, index) => (
+                          <tr key={index} className="bg-[#151b28] hover:bg-[#1a202e] border-b border-gray-700">
+                            <td className="px-6 py-4 text-gray-300 font-medium">{log.id}</td>
+                            <td className="px-6 py-4 text-gray-300">{log.bookingId}</td>
+                            <td className="px-6 py-4 text-gray-300">{log.driver}</td>
+                            <td className="px-6 py-4 text-yellow-400 font-medium">{log.event}</td>
+                            <td className="px-6 py-4 text-gray-400">{log.location}</td>
+                            <td className="px-6 py-4 text-gray-400">{log.timestamp}</td>
+                            <td className="px-6 py-4">
+                              <span 
+                                onClick={() => handleAuditStatusChange(log.dbKey, log.status)}
+                                className={`
+                                  px-3 py-1 rounded-lg text-sm font-bold text-white cursor-pointer transition-opacity hover:opacity-80
+                                  ${log.status === "Flagged"
+                                    ? "bg-red-600"
+                                    : "bg-green-600"
+                                  }
+                                `}
+                              >
+                                {log.status}
+                              </span>
                             </td>
                           </tr>
-                        )}
+                        ))}
                       </tbody>
                     </table>
-                  </div>
-
-                  <div className="mt-4 text-gray-400 text-sm">
-                    Total logs: <span className="text-yellow-500 font-bold">{auditLogs.length}</span>
+                    {filteredAuditLogs.length === 0 && (
+                      <div className="text-center text-gray-400 py-8 bg-[#252d42] rounded-lg mt-4">
+                        No logs found matching your search.
+                      </div>
+                    )}
                   </div>
                 </div>
               </div>
