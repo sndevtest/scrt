@@ -150,33 +150,72 @@
           return [u.Firstname, u.Middlename, u.Lastname].filter(Boolean).join(' ');
         };
 
-        const bookingsArr = Object.entries(rawBookings || {}).map(([key, b]) => {
-          const passengerRec = rawPassengers && rawPassengers[b.PassengerID];
-          const passengerUser = passengerRec ? rawUsers[passengerRec.UserID] : null;
-          const driverRec = rawDrivers && rawDrivers[b.DriverID];
+          const bookingsArr = Object.entries(rawBookings || {}).map(([key, b]) => {
+          // Resolve passenger: prefer booking.UserID, otherwise map PassengerID -> users
+          let passengerUser = null;
+          let passengerUserId = null;
+          if (b.userId && rawUsers && rawUsers[b.userId]) {
+            passengerUser = rawUsers[b.userId];
+            passengerUserId = String(b.userId);
+          } else if (b.PassengerID) {
+            const passengerRec = rawPassengers && rawPassengers[b.PassengerID];
+            if (passengerRec && passengerRec.UserID && rawUsers && rawUsers[passengerRec.UserID]) {
+              passengerUserId = String(passengerRec.UserID);
+              passengerUser = rawUsers[passengerRec.UserID];
+            } else {
+              Object.entries(rawUsers || {}).some(([uId, u]) => {
+                if (u && u.PassengerID && String(u.PassengerID) === String(b.PassengerID)) {
+                  passengerUserId = uId;
+                  passengerUser = u;
+                  return true;
+                }
+                return false;
+              });
+            }
+          }
+          
+          // Get driver info using driverId from bookings path
+          const driverId = b.driverId;
+          const driverRec = driverId ? (rawDrivers && rawDrivers[driverId]) : null;
           const driverUser = driverRec ? rawUsers[driverRec.UserID] : null;
+          
           const requested = b.RequestedAt || '';
-          const date = requested ? new Date(requested).toISOString().slice(0, 10) : '';
-          const time = requested ? new Date(requested).toLocaleTimeString([], {hour: '2-digit', minute:'2-digit'}) : '';
+          let dateOnly = '';
+          let timeOnly = '';
+          let requestedTs = null;
+          if (requested) {
+            const dateObj = new Date(requested);
+            const ts = dateObj.getTime();
+            if (!isNaN(ts)) {
+              requestedTs = ts;
+              dateOnly = dateObj.toLocaleDateString('en-US', { month: 'long', day: 'numeric', year: 'numeric' });
+              timeOnly = dateObj.toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit', hour12: true });
+            }
+          }
+          const date = dateOnly;
+          const time = timeOnly;
 
           // Prefer a driverSnapshot stored on the booking (backfilled or captured at assignment time)
           const dSnap = b.driverSnapshot || null;
-          let driverName = 'Driver';
-          let driverTricycle = '';
-          let driverLicense = '';
+          let driverName = 'N/A';
+          let driverTricycle = 'N/A';
+          let driverLicense = 'N/A';
           if (dSnap && dSnap.name) {
             driverName = dSnap.name;
-            driverTricycle = dSnap.tricycle || '';
-            driverLicense = dSnap.license || '';
+            driverTricycle = dSnap.tricycle || 'N/A';
+            driverLicense = dSnap.license || 'N/A';
           } else if (driverUser) {
             driverName = makeFullName(driverUser);
-            driverTricycle = driverRec ? (driverRec.TricycleNumber || '') : '';
-            driverLicense = driverRec ? (driverRec.LicenseNumber || '') : '';
+            driverTricycle = driverRec ? (driverRec.TricycleNumber || 'N/A') : 'N/A';
+            driverLicense = driverRec ? (driverRec.LicenseNumber || 'N/A') : 'N/A';
           }
+
+          const passengerName = passengerUser ? makeFullName(passengerUser) : (b.userName || 'Passenger');
+          // passengerUserId already computed above (string) or null
 
           return {
             id: parseInt(key) || hashKeyToInt(key),
-            passenger: b.userName || 'Passenger',
+            passenger: passengerName,
             pickup: b.PickupLocation || '',
             destination: b.DropoffLocation || '',
             fare: b.TotalFare || 0,
@@ -185,6 +224,7 @@
             driverTricycle,
             driverLicense,
             distance: b.distanceKm ? `${b.distanceKm}km` : '',
+            requestedTs,
             date,
             time
           };
@@ -198,12 +238,14 @@
         let filtered = [...allBookings];
 
         // Filter by date range
-        if (dateFrom) {
-          filtered = filtered.filter(b => b.date >= dateFrom);
-        }
-        if (dateTo) {
-          filtered = filtered.filter(b => b.date <= dateTo);
-        }
+          if (dateFrom) {
+            const fromTs = new Date(dateFrom + 'T00:00:00').getTime();
+            filtered = filtered.filter(b => b.requestedTs && b.requestedTs >= fromTs);
+          }
+          if (dateTo) {
+            const toTs = new Date(dateTo + 'T23:59:59.999').getTime();
+            filtered = filtered.filter(b => b.requestedTs && b.requestedTs <= toTs);
+          }
 
         // Filter by driver
         if (selectedDriver !== "All Drivers") {
@@ -365,7 +407,7 @@
                             <span className="font-medium text-gray-300">Driver:</span> {booking.driver} • <span className="font-medium text-gray-300">Distance:</span> {booking.distance}
                           </p>
                           <p className="text-sm text-gray-400">
-                            <span className="font-medium text-gray-300">Date & Time:</span> {new Date(booking.date).toLocaleDateString('en-US', { month: 'long', day: 'numeric', year: 'numeric' })} {booking.time}
+                              <span className="font-medium text-gray-300">Date & Time:</span> {booking.date} {booking.time}
                           </p>
                         </div>
                         <div className="flex flex-col items-end gap-2">

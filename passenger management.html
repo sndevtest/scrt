@@ -132,7 +132,7 @@
         const usersRef = window.dbRef(window.db, 'users');
         const passengersRef = window.dbRef(window.db, 'passengers');
         const driversRef = window.dbRef(window.db, 'drivers');
-        const bookingsRef = window.dbRef(window.db, 'booking');
+        const bookingsRef = window.dbRef(window.db, 'bookings');
         const feedbackRef = window.dbRef(window.db, 'feedback');
 
         const unsubUsers = window.dbOnValue(usersRef, snap => setRawUsers(snap.val() || {}));
@@ -172,17 +172,37 @@
             const name = makeFullName(userObj);
             const initials = name.split(" ").map(n => n[0]).join("").slice(0, 2).toUpperCase();
             
-            // Count total rides for this passenger using PassengerID
-            const totalRides = Object.values(rawBookings || {}).filter(b => 
-              String(b.PassengerID) === passengerID
-            ).length;
+            // Count total rides for this passenger using multiple possible mappings (PassengerID or userId)
+            const totalRides = Object.values(rawBookings || {}).filter(b => {
+              if (!b) return false;
+              try {
+                if (b.PassengerID && String(b.PassengerID) === passengerID) return true;
+                if (b.userId && String(b.userId) === String(userId)) return true;
+                if (b.PassengerUserID && String(b.PassengerUserID) === String(userId)) return true;
+              } catch (e) {
+                return false;
+              }
+              return false;
+            }).length;
             
+            // Normalize phone for display: if stored as +63XXXXXXXXXX or
+            // XXXXXXXXXX (10 digits), show as 0XXXXXXXXXX. Otherwise keep digits as-is.
+            let rawPhone = userObj.MobileNumber || '';
+            let displayPhone = '';
+            if (rawPhone) {
+              const s = rawPhone.toString();
+              let stripped = s.startsWith('+63') ? s.slice(3) : s;
+              const digits = stripped.replace(/\D/g, '');
+              if (digits.length === 10) displayPhone = '0' + digits;
+              else displayPhone = digits;
+            }
+
             passengersArr.push({
               id: passengerID,
               userId,
               initials,
               name,
-              phone: userObj.MobileNumber || '',
+              phone: displayPhone,
               email: userObj.Email || '',
               rides: totalRides,
               status: userObj.IsActive ? 'ACTIVE' : 'INACTIVE'
@@ -196,21 +216,28 @@
         // Build ride history
         const historyArr = [];
         Object.entries(rawBookings || {}).forEach(([bookingId, b]) => {
-          // Try to find passenger by PassengerID in booking, then lookup in users
+          // Resolve passenger for history: prefer booking.userId, then PassengerID -> users mapping
           let passengerUser = null;
-          let passengerIdDisplay = b.PassengerID;
-          
-          // Search users for matching PassengerID
-          Object.entries(rawUsers || {}).forEach(([userId, u]) => {
-            if (u.PassengerID && String(u.PassengerID) === String(b.PassengerID)) {
-              passengerUser = u;
+          let passengerIdDisplay = b.userId || b.PassengerID || '';
+
+          if (b.userId && rawUsers && rawUsers[b.userId]) {
+            passengerUser = rawUsers[b.userId];
+            passengerIdDisplay = b.userId;
+          } else if (b.PassengerID) {
+            const passengerRec = rawPassengers && rawPassengers[b.PassengerID];
+            if (passengerRec && passengerRec.UserID && rawUsers && rawUsers[passengerRec.UserID]) {
+              passengerUser = rawUsers[passengerRec.UserID];
+              passengerIdDisplay = passengerRec.UserID;
+            } else {
+              Object.entries(rawUsers || {}).some(([userId, u]) => {
+                if (u && u.PassengerID && String(u.PassengerID) === String(b.PassengerID)) {
+                  passengerUser = u;
+                  passengerIdDisplay = userId;
+                  return true;
+                }
+                return false;
+              });
             }
-          });
-          
-          // Fallback: if booking has direct reference to users node
-          if (!passengerUser && rawUsers && rawUsers[b.PassengerID]) {
-            passengerUser = rawUsers[b.PassengerID];
-            passengerIdDisplay = b.PassengerID;
           }
           
           const driverRec = rawDrivers && rawDrivers[b.DriverID];
@@ -222,6 +249,13 @@
           const feedback = Object.values(rawFeedback || {}).find(f => String(f.BookingID) === String(bookingId));
           const rating = feedback ? `${feedback.Rating}/5` : 'No rating';
           
+          // Format date safely: RequestedAt could be a timestamp object or string
+          let formattedDate = '';
+          if (b.RequestedAt) {
+            const dateStr = b.RequestedAt.toString ? b.RequestedAt.toString() : String(b.RequestedAt);
+            formattedDate = dateStr.slice(0, 10);
+          }
+          
           historyArr.push({
             passengerId: passengerIdDisplay,
             passengerName,
@@ -232,7 +266,7 @@
             dropOff: b.DropOffLocation || '',
             payment: 'Cash', // TODO: get from payment table if available
             rating,
-            date: b.RequestedAt ? b.RequestedAt.slice(0, 10) : ''
+            date: formattedDate
           });
         });
 
@@ -280,7 +314,14 @@
       };
 
       const handleEdit = (passenger, index) => {
-        setSelectedPassenger({ ...passenger });
+        // Display a leading 0 whenever the stripped phone has 10 digits.
+        // This covers both +63-prefixed values and plain 10-digit values.
+        let displayPhone = stripPhonePrefix(passenger.phone);
+        const digits = displayPhone.toString().replace(/\D/g, '');
+        if (digits.length === 10) {
+          if (!displayPhone.startsWith('0')) displayPhone = '0' + digits;
+        }
+        setSelectedPassenger({ ...passenger, phone: displayPhone });
         setSelectedPassengerIndex(index);
         setShowEditModal(true);
       };
@@ -304,11 +345,20 @@
             const lastname = nameParts.length > 1 ? nameParts[nameParts.length - 1] : '';
             const middlename = nameParts.length > 2 ? nameParts.slice(1, -1).join(' ') : (nameParts.length === 2 ? '' : '');
 
-            // Validate contact number: digits only, exactly 11
-            const phoneRaw = (selectedPassenger.phone || '').toString().replace(/\D/g, '');
-            if (phoneRaw.length !== 11) {
+            // Validate contact number: extract digits only and ensure exactly 11 digits.
+            // For display we show leading 0, but save without it to database.
+            const phoneInput = (selectedPassenger.phone || '').toString();
+            const phoneDigits = phoneInput.replace(/\D/g, '');
+
+            if (phoneDigits.length !== 11) {
               window.showAlert('Contact number must be exactly 11 digits', 'error');
               return;
+            }
+
+            // Save phone without the leading 0 (strip if present)
+            let phoneRaw = phoneDigits;
+            if (phoneRaw.startsWith('0')) {
+              phoneRaw = phoneRaw.slice(1);
             }
 
             // Prepare email: enforce gmail.com domain. If user didn't include domain, append @gmail.com
@@ -651,17 +701,34 @@
                     </div>
                     <div>
                       <label className="block text-sm text-gray-300 mb-2 font-medium">Contact Number</label>
-                      <input
-                        type="text"
-                        value={selectedPassenger.phone}
-                        className="w-full px-4 py-3 rounded-lg bg-[#252d42] text-white border border-gray-700 focus:border-yellow-500 focus:outline-none"
-                        onChange={(e) => {
-                          const digits = e.target.value.toString().replace(/\D/g, '').slice(0,11);
-                          setSelectedPassenger({ ...selectedPassenger, phone: digits });
-                          if (digits.length > 0 && digits.length !== 11) setPhoneError('Contact must be 11 digits');
-                          else setPhoneError('');
-                        }}
-                      />
+                      <div className="inline-flex items-stretch min-w-0">
+                        <div className="inline-flex items-center justify-center px-3 py-3 bg-[#111827] text-white border border-gray-700 border-r-0 rounded-l-lg">
+                          +63
+                        </div>
+                        <input
+                          type="text"
+                          value={selectedPassenger.phone}
+                          className="flex-1 min-w-0 px-4 py-3 bg-[#252d42] text-white border border-gray-700 border-l-0 rounded-r-lg focus:border-yellow-500 focus:outline-none"
+                          onChange={(e) => {
+                            let input = e.target.value.toString();
+                            // If it starts with 0, keep the 0 and allow only 10 more digits
+                            if (input.startsWith('0')) {
+                              const trailing = input.slice(1).replace(/\D/g, '').slice(0, 10);
+                              const digits = '0' + trailing;
+                              setSelectedPassenger({ ...selectedPassenger, phone: digits });
+                              if (digits.length > 0 && digits.length !== 11) setPhoneError('Contact must be 11 digits');
+                              else setPhoneError('');
+                            } else {
+                              // If somehow it doesn't start with 0, extract digits and prepend 0
+                              const allDigits = input.replace(/\D/g, '').slice(0, 10);
+                              const digits = '0' + allDigits;
+                              setSelectedPassenger({ ...selectedPassenger, phone: digits });
+                              if (digits.length > 0 && digits.length !== 11) setPhoneError('Contact must be 11 digits');
+                              else setPhoneError('');
+                            }
+                          }}
+                        />
+                      </div>
                         {phoneError && (
                           <p className="text-sm text-red-400 mt-1">{phoneError}</p>
                         )}

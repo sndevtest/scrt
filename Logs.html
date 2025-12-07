@@ -170,13 +170,14 @@
       }, [rawDrivers, rawUsers]);
 
       // Filter logs based on search term
+      const term = (searchTerm || '').toString().toLowerCase();
       const filteredLogs = logs.filter(log =>
-        log.id.toLowerCase().includes(searchTerm.toLowerCase()) ||
-        log.bookingId.toLowerCase().includes(searchTerm.toLowerCase()) ||
-        log.driver.toLowerCase().includes(searchTerm.toLowerCase()) ||
-        log.event.toLowerCase().includes(searchTerm.toLowerCase()) ||
-        log.location.toLowerCase().includes(searchTerm.toLowerCase()) ||
-        log.status.toLowerCase().includes(searchTerm.toLowerCase())
+        (log.id || '').toString().toLowerCase().includes(term) ||
+        (log.bookingId || '').toString().toLowerCase().includes(term) ||
+        (log.driver || '').toString().toLowerCase().includes(term) ||
+        (log.event || '').toString().toLowerCase().includes(term) ||
+        (log.location || '').toString().toLowerCase().includes(term) ||
+        (log.status || '').toString().toLowerCase().includes(term)
       );
 
       // Handle status change
