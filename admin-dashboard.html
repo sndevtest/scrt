@@ -785,7 +785,7 @@
     };
 
     const AdminDashboard = () => {
-      const [currentPage, setCurrentPage] = useState('drivers');
+      const [currentTab, setCurrentTab] = useState('drivers');
       const [selectedDriver, setSelectedDriver] = useState(null);
       const [selectedDriverIndex, setSelectedDriverIndex] = useState(null);
       const [showExportModal, setShowExportModal] = useState(false);
@@ -795,8 +795,27 @@
       const [rawUsers, setRawUsers] = useState({});
       const [rawDrivers, setRawDrivers] = useState({});
       const [rawApplications, setRawApplications] = useState({});
+      const [rawBookings, setRawBookings] = useState({});
+      const [rawPassengers, setRawPassengers] = useState({});
+      const [rawFeedback, setRawFeedback] = useState({});
+      const [rawAuditLogs, setRawAuditLogs] = useState({});
       const [drivers, setDrivers] = useState([]);
+      const [bookings, setBookings] = useState([]);
+      const [passengers, setPassengers] = useState([]);
+      const [auditLogs, setAuditLogs] = useState([]);
       const [showImportModal, setShowImportModal] = useState(false);
+      
+      // Booking filtering states
+      const [dateFromBooking, setDateFromBooking] = useState("");
+      const [dateToBooking, setDateToBooking] = useState("");
+      const [selectedDriverBooking, setSelectedDriverBooking] = useState("All Drivers");
+      const [statusFiltersBooking, setStatusFiltersBooking] = useState({ Completed: true, Pending: true, Cancelled: true });
+      const [showBookingFilterModal, setShowBookingFilterModal] = useState(false);
+      const [filteredBookings, setFilteredBookings] = useState([]);
+      
+      // Logs search state
+      const [logsSearchTerm, setLogsSearchTerm] = useState("");
+      const [filteredLogs, setFilteredLogs] = useState([]);
 
       useEffect(() => {
         if (!window.db || !window.dbRef || !window.dbOnValue) return;
@@ -804,15 +823,27 @@
         const usersRef = window.dbRef(window.db, 'users');
         const driversRef = window.dbRef(window.db, 'drivers');
         const applicationsRef = window.dbRef(window.db, 'applications');
+        const bookingsRef = window.dbRef(window.db, 'bookings');
+        const passengersRef = window.dbRef(window.db, 'passengers');
+        const feedbackRef = window.dbRef(window.db, 'feedback');
+        const auditLogsRef = window.dbRef(window.db, 'auditLogs');
 
         const unsubUsers = window.dbOnValue(usersRef, snap => setRawUsers(snap.val() || {}));
         const unsubDrivers = window.dbOnValue(driversRef, snap => setRawDrivers(snap.val() || {}));
         const unsubApplications = window.dbOnValue(applicationsRef, snap => setRawApplications(snap.val() || {}));
+        const unsubBookings = window.dbOnValue(bookingsRef, snap => setRawBookings(snap.val() || {}));
+        const unsubPassengers = window.dbOnValue(passengersRef, snap => setRawPassengers(snap.val() || {}));
+        const unsubFeedback = window.dbOnValue(feedbackRef, snap => setRawFeedback(snap.val() || {}));
+        const unsubAuditLogs = window.dbOnValue(auditLogsRef, snap => setRawAuditLogs(snap.val() || {}));
 
         return () => {
           try { unsubUsers(); } catch(e) {}
           try { unsubDrivers(); } catch(e) {}
           try { unsubApplications(); } catch(e) {}
+          try { unsubBookings(); } catch(e) {}
+          try { unsubPassengers(); } catch(e) {}
+          try { unsubFeedback(); } catch(e) {}
+          try { unsubAuditLogs(); } catch(e) {}
         };
       }, []);
 
@@ -938,6 +969,148 @@
         setDrivers(driversArr);
         window.drivers = driversArr;
       }, [rawUsers, rawDrivers]);
+
+      // Derive bookings array for stats calculation
+      useEffect(() => {
+        try {
+          const bookingsVal = rawBookings || {};
+          const bookingsArr = Object.entries(bookingsVal)
+            .map(([bookingId, booking]) => {
+              if (!booking) return null;
+              const passengerId = booking.PassengerID;
+              const driverId = booking.DriverID;
+              const passenger = passengerId && rawUsers && rawUsers[passengerId];
+              const driver = driverId && rawUsers && rawUsers[driverId];
+              
+              return {
+                id: bookingId,
+                raw: booking,
+                passengerName: passenger ? [passenger.Firstname, passenger.Middlename, passenger.Lastname].filter(Boolean).join(' ') : 'Unknown Passenger',
+                driverName: driver ? [driver.Firstname, driver.Middlename, driver.Lastname].filter(Boolean).join(' ') : 'Unknown Driver',
+                status: booking.Status || 'Pending',
+                requestedAt: booking.RequestedAt || '',
+                pickup: booking.PickupLocation || '',
+                destination: booking.DropoffLocation || '',
+                fare: booking.TotalFare || 0,
+                distance: booking.distanceKm ? `${booking.distanceKm}km` : ''
+              };
+            })
+            .filter(Boolean);
+          
+          setBookings(bookingsArr);
+          setFilteredBookings(bookingsArr);
+        } catch (e) {
+          console.error('Error deriving bookings:', e);
+        }
+      }, [rawBookings, rawUsers]);
+
+      // Derive passengers array
+      useEffect(() => {
+        try {
+          const passengersVal = rawPassengers || {};
+          const passengersArr = Object.entries(passengersVal)
+            .map(([passengerId, passenger]) => {
+              if (!passenger) return null;
+              const user = passenger.UserID && rawUsers && rawUsers[passenger.UserID];
+              if (!user) return null;
+              const name = [user.Firstname, user.Middlename, user.Lastname].filter(Boolean).join(' ');
+              const email = user.Email || '';
+              const phone = user.MobileNumber || '';
+              const totalRides = Object.values(rawBookings || {}).filter(b => b.PassengerID === passenger.UserID).length;
+              
+              return {
+                id: passengerId,
+                userId: passenger.UserID,
+                name,
+                email,
+                phone,
+                totalRides,
+                joinedDate: user.CreatedAt || ''
+              };
+            })
+            .filter(Boolean)
+            .sort((a, b) => b.totalRides - a.totalRides);
+          
+          setPassengers(passengersArr);
+        } catch (e) {
+          console.error('Error deriving passengers:', e);
+        }
+      }, [rawPassengers, rawUsers, rawBookings]);
+
+      // Derive audit logs
+      useEffect(() => {
+        try {
+          const logsVal = rawAuditLogs || {};
+          const logsArr = Object.entries(logsVal)
+            .map(([logKey, log]) => {
+              if (!log) return null;
+              const driverId = log.DriverID || '';
+              let driverName = 'Unknown Driver';
+              try {
+                const drv = rawDrivers && rawDrivers[driverId];
+                if (drv && drv.UserID && rawUsers && rawUsers[drv.UserID]) {
+                  const u = rawUsers[drv.UserID];
+                  driverName = [u.Firstname, u.Middlename, u.Lastname].filter(Boolean).join(' ');
+                } else if (drv) {
+                  driverName = drv.Name || drv.name || 'Unknown';
+                }
+              } catch (e) {}
+              
+              const formatDate = (timestamp) => {
+                if (!timestamp) return '';
+                const date = new Date(timestamp);
+                const year = date.getFullYear();
+                const month = String(date.getMonth() + 1).padStart(2, '0');
+                const day = String(date.getDate()).padStart(2, '0');
+                return `${year}-${month}-${day}`;
+              };
+              
+              return {
+                id: logKey,
+                bookingId: log.BookingID || '',
+                driver: driverName,
+                driverId: driverId,
+                event: log.ViolationType || log.event || '',
+                location: log.Location || log.location || '',
+                timestamp: formatDate(log.ViolationTimestamp || log.timestamp || ''),
+                status: log.IsFlaggedForReview ? 'Flagged' : (log.status || 'Reviewed')
+              };
+            })
+            .filter(Boolean)
+            .sort((a, b) => new Date(b.timestamp) - new Date(a.timestamp));
+          
+          setAuditLogs(logsArr);
+          setFilteredLogs(logsArr);
+        } catch (e) {
+          console.error('Error deriving audit logs:', e);
+        }
+      }, [rawAuditLogs, rawDrivers, rawUsers]);
+
+      // Apply booking filters
+      const applyBookingFilters = () => {
+        let filtered = [...bookings];
+        if (dateFromBooking) filtered = filtered.filter(b => b.requestedAt.slice(0, 10) >= dateFromBooking);
+        if (dateToBooking) filtered = filtered.filter(b => b.requestedAt.slice(0, 10) <= dateToBooking);
+        if (selectedDriverBooking !== "All Drivers") filtered = filtered.filter(b => b.driverName === selectedDriverBooking);
+        filtered = filtered.filter(b => {
+          const status = (b.status || 'Pending').charAt(0).toUpperCase() + (b.status || 'Pending').slice(1).toLowerCase();
+          return statusFiltersBooking[status];
+        });
+        setFilteredBookings(filtered);
+        setShowBookingFilterModal(false);
+      };
+
+      // Filter logs by search term
+      useEffect(() => {
+        const filtered = auditLogs.filter(log =>
+          log.bookingId.toLowerCase().includes(logsSearchTerm.toLowerCase()) ||
+          log.driver.toLowerCase().includes(logsSearchTerm.toLowerCase()) ||
+          log.event.toLowerCase().includes(logsSearchTerm.toLowerCase()) ||
+          log.location.toLowerCase().includes(logsSearchTerm.toLowerCase()) ||
+          log.timestamp.includes(logsSearchTerm)
+        );
+        setFilteredLogs(filtered);
+      }, [logsSearchTerm, auditLogs]);
 
       const handleEditDriver = (index) => {
         setSelectedDriver(drivers[index]);
@@ -1102,11 +1275,24 @@
           {/* Navigation Tabs */}
           <div className="bg-[#0f1419] border-b border-gray-700 sticky top-0 z-10">
             <div className="max-w-7xl mx-auto px-6">
-              <div className="flex gap-8">
+              <div className="flex gap-8 overflow-x-auto">
                 <button
-                  onClick={() => setCurrentPage('drivers')}
-                  className={`py-4 px-2 border-b-2 font-medium transition-colors ${
-                    currentPage === 'drivers'
+                  onClick={() => setCurrentTab('overview')}
+                  className={`py-4 px-2 border-b-2 font-medium transition-colors whitespace-nowrap ${
+                    currentTab === 'overview'
+                      ? 'border-yellow-500 text-yellow-500'
+                      : 'border-transparent text-gray-400 hover:text-yellow-400'
+                  }`}
+                >
+                  <svg className="w-5 h-5 inline mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M3 12l2-2m0 0l7-7 7 7M5 10v10a1 1 0 001 1h3m10-11l2 2m-2-2v10a1 1 0 01-1 1h-3m-6 0a1 1 0 001-1v-4a1 1 0 011-1h2a1 1 0 011 1v4a1 1 0 001 1m-6 0h6" />
+                  </svg>
+                  Overview
+                </button>
+                <button
+                  onClick={() => setCurrentTab('drivers')}
+                  className={`py-4 px-2 border-b-2 font-medium transition-colors whitespace-nowrap ${
+                    currentTab === 'drivers'
                       ? 'border-yellow-500 text-yellow-500'
                       : 'border-transparent text-gray-400 hover:text-yellow-400'
                   }`}
@@ -1114,7 +1300,46 @@
                   <svg className="w-5 h-5 inline mr-2" fill="currentColor" viewBox="0 0 20 20">
                     <path d="M9 6a3 3 0 11-6 0 3 3 0 016 0zM9 10a6 6 0 1 1-12 0 6 6 0 0 1 12 0z" />
                   </svg>
-                  Driver Management
+                  Drivers
+                </button>
+                <button
+                  onClick={() => setCurrentTab('bookings')}
+                  className={`py-4 px-2 border-b-2 font-medium transition-colors whitespace-nowrap ${
+                    currentTab === 'bookings'
+                      ? 'border-yellow-500 text-yellow-500'
+                      : 'border-transparent text-gray-400 hover:text-yellow-400'
+                  }`}
+                >
+                  <svg className="w-5 h-5 inline mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2" />
+                  </svg>
+                  Bookings
+                </button>
+                <button
+                  onClick={() => setCurrentTab('passengers')}
+                  className={`py-4 px-2 border-b-2 font-medium transition-colors whitespace-nowrap ${
+                    currentTab === 'passengers'
+                      ? 'border-yellow-500 text-yellow-500'
+                      : 'border-transparent text-gray-400 hover:text-yellow-400'
+                  }`}
+                >
+                  <svg className="w-5 h-5 inline mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M16 7a4 4 0 11-8 0 4 4 0 018 0zM12 14a7 7 0 00-7 7h14a7 7 0 00-7-7z" />
+                  </svg>
+                  Passengers
+                </button>
+                <button
+                  onClick={() => setCurrentTab('logs')}
+                  className={`py-4 px-2 border-b-2 font-medium transition-colors whitespace-nowrap ${
+                    currentTab === 'logs'
+                      ? 'border-yellow-500 text-yellow-500'
+                      : 'border-transparent text-gray-400 hover:text-yellow-400'
+                  }`}
+                >
+                  <svg className="w-5 h-5 inline mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z" />
+                  </svg>
+                  Logs
                 </button>
               </div>
             </div>
@@ -1122,14 +1347,122 @@
 
           {/* Content */}
           <div className="max-w-7xl mx-auto px-6 py-8">
-            {currentPage === 'drivers' && (
+            {currentTab === 'overview' && (
               <div className="space-y-6">
-                <div className="flex justify-between items-center">
+                {/* Dashboard Stats Cards */}
+                <div className="grid grid-cols-1 md:grid-cols-3 gap-6 mb-8">
+                  <div className="bg-[#1e2538] p-6 rounded-xl shadow flex justify-between items-center">
+                    <div>
+                      <p className="text-gray-400">TODAY'S RIDES</p>
+                      <h3 className="text-3xl font-bold">{(() => {
+                        try {
+                          const today = new Date().toISOString().slice(0,10);
+                          return bookings.filter(b => (b.raw && b.raw.RequestedAt && b.raw.RequestedAt.slice(0,10) === today)).length || 0;
+                        } catch(e) { return 0; }
+                      })()}</h3>
+                      <p className="text-green-400">Live count from DB</p>
+                    </div>
+                    <img src="today's rides.png" className="w-16 h-16" alt="Rides" />
+                  </div>
+
+                  <div className="bg-[#1e2538] p-6 rounded-xl shadow flex justify-between items-center">
+                    <div>
+                      <p className="text-gray-400">ACTIVE DRIVERS</p>
+                      <h3 className="text-3xl font-bold">{drivers.filter(d => d.status === 'Active').length}</h3>
+                      <p className="text-green-400">Online drivers (live)</p>
+                    </div>
+                    <img src="tricy.png" className="w-16 h-16" alt="Drivers" />
+                  </div>
+
+                  <div className="bg-[#1e2538] p-6 rounded-xl shadow flex justify-between items-center">
+                    <div>
+                      <p className="text-gray-400">TOTAL BOOKINGS</p>
+                      <h3 className="text-3xl font-bold">{bookings.length}</h3>
+                      <p className="text-green-400">Total bookings (live)</p>
+                    </div>
+                    <img src="booking.png" className="w-16 h-16" alt="Bookings" />
+                  </div>
+                </div>
+
+                {/* Stats Breakdown */}
+                <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
+                  <div className="bg-gradient-to-br from-[#1e2538] to-[#0a0e1a] rounded-lg p-4 border border-green-900">
+                    <p className="text-gray-400 text-sm mb-1">ACTIVE DRIVERS</p>
+                    <h3 className="text-2xl font-bold text-green-400">{drivers.filter(d => d.isActiveUser && d.status === 'Active').length}</h3>
+                    <p className="text-gray-500 text-xs mt-1">Ready to accept rides</p>
+                  </div>
+                  <div className="bg-gradient-to-br from-[#1e2538] to-[#0a0e1a] rounded-lg p-4 border border-blue-900">
+                    <p className="text-gray-400 text-sm mb-1">PASSENGERS</p>
+                    <h3 className="text-2xl font-bold text-blue-400">{passengers.length}</h3>
+                    <p className="text-gray-500 text-xs mt-1">Registered users</p>
+                  </div>
+                  <div className="bg-gradient-to-br from-[#1e2538] to-[#0a0e1a] rounded-lg p-4 border border-yellow-900">
+                    <p className="text-gray-400 text-sm mb-1">FLAGGED LOGS</p>
+                    <h3 className="text-2xl font-bold text-yellow-400">{auditLogs.filter(l => l.status === 'Flagged').length}</h3>
+                    <p className="text-gray-500 text-xs mt-1">Need review</p>
+                  </div>
+                  <div className="bg-gradient-to-br from-[#1e2538] to-[#0a0e1a] rounded-lg p-4 border border-red-900">
+                    <p className="text-gray-400 text-sm mb-1">COMPLETION RATE</p>
+                    <h3 className="text-2xl font-bold text-red-400">{bookings.length > 0 ? Math.round((bookings.filter(b => b.status === 'Completed').length / bookings.length) * 100) : 0}%</h3>
+                    <p className="text-gray-500 text-xs mt-1">Of all bookings</p>
+                  </div>
+                </div>
+              </div>
+            )}
+
+            {currentTab === 'drivers' && (
+              <div className="space-y-6">
+                {/* Dashboard Stats Cards */}
+                <div className="grid grid-cols-1 md:grid-cols-3 gap-6 mb-8">
+                  <div className="bg-[#1e2538] p-6 rounded-xl shadow flex justify-between items-center">
+                    <div>
+                      <p className="text-gray-400">TODAY'S RIDES</p>
+                      <h3 className="text-3xl font-bold">{(() => {
+                        try {
+                          const today = new Date().toISOString().slice(0,10);
+                          return bookings.filter(b => (b.raw && b.raw.RequestedAt && b.raw.RequestedAt.slice(0,10) === today)).length || 0;
+                        } catch(e) { return 0; }
+                      })()}</h3>
+                      <p className="text-green-400">Live count from DB</p>
+                    </div>
+                    <img src="today's rides.png" className="w-16 h-16" alt="Rides" />
+                  </div>
+
+                  <div className="bg-[#1e2538] p-6 rounded-xl shadow flex justify-between items-center">
+                    <div>
+                      <p className="text-gray-400">ACTIVE DRIVERS</p>
+                      <h3 className="text-3xl font-bold">{drivers.filter(d => d.status === 'Active').length}</h3>
+                      <p className="text-green-400">Online drivers (live)</p>
+                    </div>
+                    <img src="tricy.png" className="w-16 h-16" alt="Drivers" />
+                  </div>
+
+                  <div className="bg-[#1e2538] p-6 rounded-xl shadow flex justify-between items-center">
+                    <div>
+                      <p className="text-gray-400">TOTAL BOOKINGS</p>
+                      <h3 className="text-3xl font-bold">{bookings.length}</h3>
+                      <p className="text-green-400">Total bookings (live)</p>
+                    </div>
+                    <img src="booking.png" className="w-16 h-16" alt="Bookings" />
+                  </div>
+                </div>
+
+                {/* Driver Management Section */}
+                <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center gap-4">
                   <h2 className="text-2xl font-bold text-white">Driver Management ({drivers.length} drivers)</h2>
-                  <div className="flex gap-3">
+                  <div className="flex flex-col sm:flex-row gap-3 w-full sm:w-auto">
+                    <button 
+                      onClick={() => setShowAddModal(true)}
+                      className="bg-green-600 hover:bg-green-700 px-4 py-2 rounded-lg text-white font-semibold flex items-center justify-center gap-2"
+                    >
+                      <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 4v16m8-8H4" />
+                      </svg>
+                      ADD NEW DRIVER
+                    </button>
                     <button 
                       onClick={() => setShowExportModal(true)}
-                      className="bg-yellow-500 hover:bg-yellow-600 px-4 py-2 rounded-lg text-gray-900 font-semibold flex items-center gap-2"
+                      className="bg-yellow-500 hover:bg-yellow-600 px-4 py-2 rounded-lg text-gray-900 font-semibold flex items-center justify-center gap-2"
                     >
                       <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                         <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 10v6m0 0l-3-3m3 3l3-3m2 8H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
@@ -1138,13 +1471,37 @@
                     </button>
                     <button 
                       onClick={() => setShowImportModal(true)}
-                      className="bg-yellow-500 hover:bg-yellow-600 px-4 py-2 rounded-lg text-gray-900 font-semibold flex items-center gap-2"
+                      className="bg-yellow-500 hover:bg-yellow-600 px-4 py-2 rounded-lg text-gray-900 font-semibold flex items-center justify-center gap-2"
                     >
                       <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                         <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 4v16m8-8H4" />
                       </svg>
                       ADD APPROVED DRIVERS
                     </button>
+                  </div>
+                </div>
+
+                {/* Driver Status Summary */}
+                <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
+                  <div className="bg-gradient-to-br from-[#1e2538] to-[#0a0e1a] rounded-lg p-4 border border-green-900">
+                    <p className="text-gray-400 text-sm mb-1">ACTIVE DRIVERS</p>
+                    <h3 className="text-2xl font-bold text-green-400">{drivers.filter(d => d.isActiveUser && d.status === 'Active').length}</h3>
+                    <p className="text-gray-500 text-xs mt-1">Ready to accept rides</p>
+                  </div>
+                  <div className="bg-gradient-to-br from-[#1e2538] to-[#0a0e1a] rounded-lg p-4 border border-blue-900">
+                    <p className="text-gray-400 text-sm mb-1">VERIFIED DRIVERS</p>
+                    <h3 className="text-2xl font-bold text-blue-400">{drivers.filter(d => d.license && d.license.length > 0).length}</h3>
+                    <p className="text-gray-500 text-xs mt-1">License verified</p>
+                  </div>
+                  <div className="bg-gradient-to-br from-[#1e2538] to-[#0a0e1a] rounded-lg p-4 border border-yellow-900">
+                    <p className="text-gray-400 text-sm mb-1">INACTIVE DRIVERS</p>
+                    <h3 className="text-2xl font-bold text-yellow-400">{drivers.filter(d => !d.isActiveUser || d.status === 'Inactive').length}</h3>
+                    <p className="text-gray-500 text-xs mt-1">Suspended or off-duty</p>
+                  </div>
+                  <div className="bg-gradient-to-br from-[#1e2538] to-[#0a0e1a] rounded-lg p-4 border border-red-900">
+                    <p className="text-gray-400 text-sm mb-1">COMPLETION RATE</p>
+                    <h3 className="text-2xl font-bold text-red-400">{drivers.length > 0 ? (bookings.filter(b => b.status === 'Completed').length > 0 ? Math.round((bookings.filter(b => b.status === 'Completed').length / Math.max(bookings.length, 1)) * 100) : 0) : 0}%</h3>
+                    <p className="text-gray-500 text-xs mt-1">Of all bookings</p>
                   </div>
                 </div>
 
@@ -1196,6 +1553,123 @@
                 </div>
               </div>
             )}
+
+            {currentTab === 'bookings' && (
+              <div className="space-y-6">
+                <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center gap-4">
+                  <h2 className="text-2xl font-bold text-white">Booking Management ({filteredBookings.length} bookings)</h2>
+                  <button
+                    className="bg-yellow-500 hover:bg-yellow-600 px-6 py-3 rounded-lg font-semibold text-gray-900 flex items-center gap-2"
+                    onClick={() => setShowBookingFilterModal(true)}
+                  >
+                    <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M3 4a1 1 0 011-1h16a1 1 0 011 1v2.586a1 1 0 01-.293.707l-6.414 6.414a1 1 0 00-.293.707V17l-4 4v-6.586a1 1 0 00-.293-.707L3.293 7.293A1 1 0 013 6.586V4z" />
+                    </svg>
+                    FILTER
+                  </button>
+                </div>
+
+                <div className="bg-[#1e2538] p-6 rounded-lg space-y-4">
+                  {filteredBookings.length > 0 ? (
+                    filteredBookings.map(booking => (
+                      <div key={booking.id} className="bg-[#252d42] p-6 rounded-lg hover:bg-[#2d3548] transition-colors">
+                        <div className="flex justify-between items-start">
+                          <div className="flex-1">
+                            <h4 className="font-bold text-white text-lg mb-2">Booking #{booking.id}</h4>
+                            <p className="text-sm text-gray-400 mb-1"><span className="font-medium text-gray-300">Passenger:</span> {booking.passengerName}</p>
+                            <p className="text-sm text-gray-400 mb-1"><span className="font-medium text-gray-300">Route:</span> {booking.pickup} → {booking.destination}</p>
+                            <p className="text-sm text-gray-400 mb-1"><span className="font-medium text-gray-300">Driver:</span> {booking.driverName} • <span className="font-medium text-gray-300">Distance:</span> {booking.distance}</p>
+                            <p className="text-sm text-gray-400"><span className="font-medium text-gray-300">Date:</span> {booking.requestedAt.slice(0, 10)}</p>
+                          </div>
+                          <div className="flex flex-col items-end gap-2">
+                            <span className={`px-4 py-2 rounded-lg text-sm font-bold ${
+                              booking.status === "Completed" ? "bg-green-600 text-white" :
+                              booking.status === "Pending" ? "bg-yellow-500 text-gray-900" :
+                              "bg-red-600 text-white"
+                            }`}>
+                              {booking.status}
+                            </span>
+                            <span className="text-xl font-bold text-yellow-500">₱{booking.fare}</span>
+                          </div>
+                        </div>
+                      </div>
+                    ))
+                  ) : (
+                    <div className="text-center text-gray-400 py-8">No bookings found</div>
+                  )}
+                </div>
+              </div>
+            )}
+
+            {currentTab === 'passengers' && (
+              <div className="space-y-6">
+                <h2 className="text-2xl font-bold text-white">Passenger Management ({passengers.length} passengers)</h2>
+                <div className="bg-[#1e2538] p-6 rounded-lg">
+                  <div className="space-y-4">
+                    {passengers.length > 0 ? (
+                      passengers.map((passenger, idx) => (
+                        <div key={idx} className="bg-[#252d42] p-6 rounded-lg hover:shadow-lg transition-shadow flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4">
+                          <div className="flex-1">
+                            <h4 className="font-bold text-white text-lg">{passenger.name}</h4>
+                            <p className="text-sm text-gray-400 mt-2"><span className="font-medium">Email:</span> {passenger.email || 'N/A'}</p>
+                            <p className="text-sm text-gray-400"><span className="font-medium">Phone:</span> {stripPhonePrefix(passenger.phone) || 'N/A'}</p>
+                            <p className="text-sm text-gray-400"><span className="font-medium">Joined:</span> {passenger.joinedDate.slice(0, 10)}</p>
+                          </div>
+                          <div className="bg-gradient-to-br from-[#1e2538] to-[#0a0e1a] rounded-lg p-4 border border-blue-900 sm:text-right">
+                            <p className="text-gray-400 text-sm">Total Rides</p>
+                            <h3 className="text-2xl font-bold text-blue-400">{passenger.totalRides}</h3>
+                          </div>
+                        </div>
+                      ))
+                    ) : (
+                      <div className="text-center text-gray-400 py-8">No passengers found</div>
+                    )}
+                  </div>
+                </div>
+              </div>
+            )}
+
+            {currentTab === 'logs' && (
+              <div className="space-y-6">
+                <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center gap-4">
+                  <h2 className="text-2xl font-bold text-white">Audit Logs ({filteredLogs.length} logs)</h2>
+                  <input
+                    type="text"
+                    placeholder="Search logs..."
+                    value={logsSearchTerm}
+                    onChange={(e) => setLogsSearchTerm(e.target.value)}
+                    className="px-4 py-2 rounded-lg bg-[#252d42] text-white border border-gray-700 focus:border-yellow-500 focus:outline-none w-full sm:w-auto"
+                  />
+                </div>
+
+                <div className="bg-[#1e2538] p-6 rounded-lg">
+                  <div className="space-y-3">
+                    {filteredLogs.length > 0 ? (
+                      filteredLogs.map(log => (
+                        <div key={log.id} className="bg-[#252d42] p-4 rounded-lg hover:bg-[#2d3548] transition-colors">
+                          <div className="flex justify-between items-start">
+                            <div className="flex-1">
+                              <p className="text-sm text-gray-400"><span className="font-medium text-gray-300">Booking ID:</span> {log.bookingId}</p>
+                              <p className="text-sm text-gray-400"><span className="font-medium text-gray-300">Driver:</span> {log.driver}</p>
+                              <p className="text-sm text-gray-400"><span className="font-medium text-gray-300">Event:</span> {log.event}</p>
+                              <p className="text-sm text-gray-400"><span className="font-medium text-gray-300">Location:</span> {log.location}</p>
+                              <p className="text-sm text-gray-400"><span className="font-medium text-gray-300">Date:</span> {log.timestamp}</p>
+                            </div>
+                            <span className={`px-3 py-1 rounded text-sm font-bold whitespace-nowrap ${
+                              log.status === 'Flagged' ? 'bg-red-600 text-white' : 'bg-green-600 text-white'
+                            }`}>
+                              {log.status}
+                            </span>
+                          </div>
+                        </div>
+                      ))
+                    ) : (
+                      <div className="text-center text-gray-400 py-8">No logs found</div>
+                    )}
+                  </div>
+                </div>
+              </div>
+            )}
           </div>
 
           {/* Modals */}
@@ -1215,6 +1689,56 @@
             />
           )}
           {showExportModal && <ExportDataModal drivers={drivers} onClose={() => setShowExportModal(false)} />}
+          
+          {/* Booking Filter Modal */}
+          {showBookingFilterModal && (
+            <div className="fixed inset-0 flex items-center justify-center bg-black bg-opacity-80 z-50">
+              <div className="bg-[#1e2538] p-8 rounded-xl w-full max-w-md">
+                <h2 className="text-2xl font-bold mb-6 text-white">Filter Bookings</h2>
+                <div className="space-y-4">
+                  <div>
+                    <label className="block text-gray-300 mb-2 font-medium">Date From</label>
+                    <input 
+                      type="date" 
+                      value={dateFromBooking}
+                      onChange={(e) => setDateFromBooking(e.target.value)}
+                      className="w-full px-4 py-3 rounded-lg bg-[#252d42] text-white border border-gray-700 focus:border-yellow-500 focus:outline-none"
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-gray-300 mb-2 font-medium">Date To</label>
+                    <input 
+                      type="date" 
+                      value={dateToBooking}
+                      onChange={(e) => setDateToBooking(e.target.value)}
+                      className="w-full px-4 py-3 rounded-lg bg-[#252d42] text-white border border-gray-700 focus:border-yellow-500 focus:outline-none"
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-gray-300 mb-2 font-medium">Status</label>
+                    <div className="space-y-2">
+                      {['Completed', 'Pending', 'Cancelled'].map(status => (
+                        <label key={status} className="flex items-center gap-2 text-gray-300 cursor-pointer">
+                          <input 
+                            type="checkbox"
+                            checked={statusFiltersBooking[status]}
+                            onChange={() => setStatusFiltersBooking(prev => ({ ...prev, [status]: !prev[status] }))}
+                            className="w-4 h-4"
+                          />
+                          {status}
+                        </label>
+                      ))}
+                    </div>
+                  </div>
+                </div>
+                <div className="flex justify-between gap-3 mt-6">
+                  <button onClick={() => setShowBookingFilterModal(false)} className="bg-gray-600 hover:bg-gray-700 px-6 py-2 rounded-lg font-semibold text-white">Cancel</button>
+                  <button onClick={applyBookingFilters} className="bg-green-600 hover:bg-green-700 px-6 py-2 rounded-lg font-semibold text-white">Apply</button>
+                </div>
+              </div>
+            </div>
+          )}
+          
           {confirmDelete.open && (
             <div className="fixed inset-0 flex items-center justify-center bg-black bg-opacity-80 z-50">
               <div className="bg-[#1e2538] p-8 rounded-xl w-full max-w-md">
