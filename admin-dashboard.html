@@ -1197,6 +1197,14 @@
             const finalPassengerName = passengerName || b.userName || b.PassengerName || 'Unknown';
             const passengerDisplayId = passengerUserId || b.PassengerID || '';
 
+            const statusNormalized = (b.Status || 'Unknown').charAt(0).toUpperCase() + (b.Status || 'Unknown').slice(1).toLowerCase();
+            
+            // Only include valid statuses: Completed, Pending, Cancelled
+            const validStatuses = ['Completed', 'Pending', 'Cancelled'];
+            if (!validStatuses.includes(statusNormalized)) {
+              return null;
+            }
+
             return {
               id: parseInt(key) || hashKeyToInt(key),
               bookingIdNumeric: parseInt(key) || hashKeyToInt(key),
@@ -1213,8 +1221,8 @@
               destination: b.DropoffLocation || b.DropOffLocation || '',
               fare: b.TotalFare || b.TotalFare || 0,
               distance: b.distanceKm ? `${b.distanceKm}km` : '',
-              status: (b.Status || 'Unknown').charAt(0).toUpperCase() + (b.Status || 'Unknown').slice(1).toLowerCase(),
-              statusNormalized: (b.Status || 'Unknown').charAt(0).toUpperCase() + (b.Status || 'Unknown').slice(1).toLowerCase(),
+              status: statusNormalized,
+              statusNormalized: statusNormalized,
               requestedAt: b.RequestedAt || '',
               requestedTs,
               date: date,
@@ -1460,25 +1468,34 @@
         setShowBookingFilterModal(false);
       };
 
-      // Apply driver filters
+      // Apply driver filters with independent filter logic
       const applyDriverFilters = () => {
         let filtered = [...drivers];
 
-        // Filter by active/inactive status
-        filtered = filtered.filter(d => {
-          const isActive = d.isActiveUser;
-          if (isActive && driverStatusFilters.Active) return true;
-          if (!isActive && driverStatusFilters.Inactive) return true;
-          return false;
-        });
+        // Determine which filter categories have selections
+        const accountStatusChecked = driverStatusFilters.Active || driverStatusFilters.Inactive;
+        const onlineStatusChecked = driverOnlineFilters.Online || driverOnlineFilters.Offline;
 
-        // Filter by online/offline status
-        filtered = filtered.filter(d => {
-          const isOnline = d.status === 'Active';
-          if (isOnline && driverOnlineFilters.Online) return true;
-          if (!isOnline && driverOnlineFilters.Offline) return true;
-          return false;
-        });
+        // If at least one filter is active, apply filtering
+        if (accountStatusChecked || onlineStatusChecked) {
+          filtered = filtered.filter(d => {
+            const isActive = d.isActiveUser;
+            const isOnline = d.status === 'Active';
+
+            // Check account status condition
+            const matchesAccountStatus = !accountStatusChecked || 
+              (isActive && driverStatusFilters.Active) || 
+              (!isActive && driverStatusFilters.Inactive);
+
+            // Check online status condition
+            const matchesOnlineStatus = !onlineStatusChecked || 
+              (isOnline && driverOnlineFilters.Online) || 
+              (!isOnline && driverOnlineFilters.Offline);
+
+            // Both conditions must be true (or be inactive/not checked)
+            return matchesAccountStatus && matchesOnlineStatus;
+          });
+        }
 
         setFilteredDrivers(filtered);
         setShowDriverFilterModal(false);
@@ -1989,7 +2006,7 @@
                   <div className="bg-gradient-to-br from-[#1e2538] to-[#0a0e1a] rounded-lg p-4 border border-blue-900">
                     <p className="text-gray-400 text-sm mb-1">VERIFIED DRIVERS</p>
                     <h3 className="text-2xl font-bold text-blue-400">{drivers.filter(d => d.status === 'Active' && d.isActiveUser).length}</h3>
-                    <p className="text-gray-500 text-xs mt-1">Verified and active</p>
+                    <p className="text-gray-500 text-xs mt-1">With Verified Documents</p>
                   </div>
                   <div className="bg-gradient-to-br from-[#1e2538] to-[#0a0e1a] rounded-lg p-4 border border-red-900">
                     <p className="text-gray-400 text-sm mb-1">INACTIVE DRIVERS</p>
