@@ -965,6 +965,14 @@
 
           const allApproved = [...allDriversFromDb, ...appsArr].filter(a => {
             const status = a._status || '';
+            // Only show drivers that are APPROVED and NOT in the driver management (IsActive=false)
+            // Drivers from drivers/ check IsActive from linked user record
+            if (a._source === 'drivers') {
+              const userId = a.UserID;
+              const user = userId && rawUsers && rawUsers[userId];
+              return status.includes('APPROVED') && user && !user.IsActive;
+            }
+            // For applications/, assume not yet imported if APPROVED
             return status.includes('APPROVED');
           });
 
@@ -1045,6 +1053,7 @@
               contact,
               status,
               isActiveUser: !!u.IsActive,
+              isApplying: drvRec ? !!drvRec.IsApplying : true,
               registeredDate: u.CreatedAt || '' ,
               franchiseExpiry: franchiseExpiry,
               isExpired: franchiseHasExpired || isAppStatusExpired || isAppStatusRejected || isUserStatusExpired || isUserStatusRejected
@@ -2199,8 +2208,8 @@
                             <span className={`inline-flex items-center justify-center h-9 min-w-[88px] px-4 rounded-lg text-sm font-semibold ${driver.isActiveUser ? 'bg-blue-500 text-white' : 'bg-gray-500 text-white'}`}>
                               {driver.isActiveUser ? 'Active' : 'Inactive'}
                             </span>
-                            <span className={`inline-flex items-center justify-center h-9 min-w-[88px] px-4 rounded-lg text-sm font-semibold ${driver.status === 'Active' ? 'bg-green-500 text-white' : 'bg-gray-500 text-white'}`}>
-                              {driver.status === 'Active' ? 'Online' : 'Offline'}
+                            <span className={`inline-flex items-center justify-center h-9 min-w-[88px] px-4 rounded-lg text-sm font-semibold ${!driver.isApplying ? 'bg-green-500 text-white' : 'bg-gray-500 text-white'}`}>
+                              {!driver.isApplying ? 'Online' : 'Offline'}
                             </span>
                           </div>
 

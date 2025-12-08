@@ -527,10 +527,31 @@
           if (typeof selected.id === 'string' && selected.id.startsWith('drv-')) {
             const drvId = selected.id.replace(/^drv-/, '');
             const drvRef = window.dbRef(window.db, `drivers/${drvId}`);
-            try {
-              let finalAppStatus = appStatus;
-              const drvRec = rawDrivers && rawDrivers[String(drvId)];
+              try {
+              // Fetch latest driver record directly from DB to avoid using potentially stale local snapshot
+              let drvRec = {};
+              try {
+                const drvSnapLatest = await window.dbGet(drvRef);
+                drvRec = drvSnapLatest.exists ? drvSnapLatest.val() : drvSnapLatest.val();
+              } catch (e) { drvRec = rawDrivers && rawDrivers[String(drvId)] || {}; }
               const linkedUserId = drvRec && drvRec.UserID;
+              
+              // First, compute what IsApplying should be
+              let newIsApplying = true;
+              try {
+                if (appStatus === 'ADDED') {
+                  newIsApplying = false;
+                } else if (appStatus === 'REJECTED' || appStatus === 'EXPIRED') {
+                  newIsApplying = true;
+                } else if (typeof drvRec !== 'undefined' && typeof drvRec.IsApplying !== 'undefined') {
+                  newIsApplying = drvRec.IsApplying;
+                } else {
+                  newIsApplying = true;
+                }
+              } catch (e) { newIsApplying = true; }
+              
+              // Now check APPROVED->ADDED with the NEW IsApplying value
+              let finalAppStatus = appStatus;
               try {
                 const scheck = (appStatus || '').toString().toUpperCase();
                 if (scheck.includes('APPROVED') && linkedUserId) {
@@ -538,7 +559,8 @@
                     const userRefCheck = window.dbRef(window.db, `users/${linkedUserId}`);
                     const userSnapCheck = await window.dbGet(userRefCheck);
                     const userObjCheck = userSnapCheck.exists ? userSnapCheck.val() : userSnapCheck.val();
-                    if (userObjCheck && userObjCheck.Status) {
+                    // Only transition to ADDED if user IsActive===true AND new IsApplying===false
+                    if (userObjCheck && userObjCheck.IsActive === true && newIsApplying === false) {
                       finalAppStatus = 'ADDED';
                     }
                   } catch (e) { console.warn('Failed to check linked user Status for driver update', e); }
@@ -554,6 +576,8 @@
               try {
                 if (finalAppStatus === 'ADDED') {
                   driverUpdatePayload.IsApplying = false;
+                } else if (finalAppStatus === 'REJECTED' || finalAppStatus === 'EXPIRED') {
+                  driverUpdatePayload.IsApplying = true;
                 } else if (typeof drvRec !== 'undefined' && typeof drvRec.IsApplying !== 'undefined') {
                   driverUpdatePayload.IsApplying = drvRec.IsApplying;
                 } else {
@@ -561,8 +585,9 @@
                 }
               } catch (e) { driverUpdatePayload.IsApplying = true; }
 
-              try { console.debug('Updating driver', drvId, 'with payload:', driverUpdatePayload); } catch(e) {}
+              try { console.debug('saveChanges - Updating driver', drvId, 'finalAppStatus:', finalAppStatus, 'IsApplying will be:', driverUpdatePayload.IsApplying, 'full payload:', driverUpdatePayload); } catch(e) {}
               await window.dbUpdate(drvRef, driverUpdatePayload);
+              try { console.debug('saveChanges - Driver update completed for drvId:', drvId); } catch(e) {}
 
               try {
                 const drvRec = rawDrivers && rawDrivers[String(drvId)];
@@ -592,24 +617,12 @@
                 }
               } catch (e) { console.warn('Failed to send notification to user for driver status change', e); }
 
+              // Refresh rawDrivers from database to ensure real-time listener catches the update
               try {
-                const updatedMembers = [...members];
-                let displayStatusAfter = appStatus;
-                updatedMembers[selectedIndex] = { ...updatedMembers[selectedIndex], ...payload, status: displayStatusAfter, color: getStatusColor(displayStatusAfter) };
-                setMembers(updatedMembers);
-
-                setRawDrivers(prev => {
-                  const copy = { ...(prev || {}) };
-                  copy[drvId] = { ...(copy[drvId] || {}), ...driverUpdatePayload };
-                  return copy;
-                });
-
-                try {
-                  const driversSnap = await window.dbGet(window.dbRef(window.db, 'drivers'));
-                  const drvVal = driversSnap.val() || {};
-                  setRawDrivers(drvVal);
-                } catch(e) { console.warn('Failed to refresh drivers after update', e); }
-              } catch (e) { console.warn('Error updating local state after driver update', e); }
+                const driversSnap = await window.dbGet(window.dbRef(window.db, 'drivers'));
+                const drvVal = driversSnap.val() || {};
+                setRawDrivers(drvVal);
+              } catch(e) { console.warn('Failed to refresh drivers after update', e); }
 
               window.showAlert("Application status saved for " + selected.name, 'success');
               closeModal();
@@ -658,7 +671,16 @@
                       const userRefCheck2 = window.dbRef(window.db, `users/${userIdVal2}`);
                       const userSnapCheck2 = await window.dbGet(userRefCheck2);
                       const userObjCheck2 = userSnapCheck2.exists ? userSnapCheck2.val() : userSnapCheck2.val();
-                      if (userObjCheck2 && userObjCheck2.Status) finalApp = 'ADDED';
+                      // Re-fetch driver record to ensure we use the latest IsApplying flag
+                      let drvRecCheck = {};
+                      try {
+                        const drvSnapLatest3 = await window.dbGet(window.dbRef(window.db, `drivers/${drvKey}`));
+                        drvRecCheck = drvSnapLatest3.exists ? drvSnapLatest3.val() : drvSnapLatest3.val();
+                      } catch (e) { drvRecCheck = rawDrivers && rawDrivers[String(drvKey)] || {}; }
+                      // Only transition to ADDED if user IsActive=true AND driver IsApplying=false
+                      if (userObjCheck2 && userObjCheck2.IsActive === true && drvRecCheck && drvRecCheck.IsApplying === false) {
+                        finalApp = 'ADDED';
+                      }
                     } catch (e) { console.warn('Failed to check user Status for applicant->driver update', e); }
                   }
                 } catch (e) {}
@@ -668,8 +690,20 @@
                 driverUpdate.TricycleNumber = payload.tricycleNumber || '';
                 if (payload.license) driverUpdate.LicenseNumber = payload.license;
                 if (payload.franchiseExpiry) driverUpdate.FranchiseExpiry = payload.franchiseExpiry;
-                try { driverUpdate.IsApplying = (finalApp === 'ADDED' ? false : true); } catch(e) { driverUpdate.IsApplying = true; }
+                try {
+                  if (finalApp === 'ADDED') {
+                    driverUpdate.IsApplying = false;
+                  } else if (finalApp === 'REJECTED' || finalApp === 'EXPIRED') {
+                    driverUpdate.IsApplying = true;
+                  } else if (typeof drvRecCheck !== 'undefined' && typeof drvRecCheck.IsApplying !== 'undefined') {
+                    driverUpdate.IsApplying = drvRecCheck.IsApplying;
+                  } else {
+                    driverUpdate.IsApplying = true;
+                  }
+                } catch(e) { driverUpdate.IsApplying = true; }
+                try { console.debug('saveChanges - Updating driver (applicant path)', drvKey, 'finalApp:', finalApp, 'IsApplying will be:', driverUpdate.IsApplying, 'full payload:', driverUpdate); } catch(e) {}
                 await window.dbUpdate(window.dbRef(window.db, `drivers/${drvKey}`), driverUpdate);
+                try { console.debug('saveChanges - Driver update completed for drvKey:', drvKey); } catch(e) {}
 
                 try {
                   if (userIdVal2) {
@@ -735,8 +769,14 @@
                         const userRefCheck3 = window.dbRef(window.db, `users/${userIdVal || userIdVal2}`);
                         const userSnapCheck3 = await window.dbGet(userRefCheck3);
                         const userObjCheck3 = userSnapCheck3.exists ? userSnapCheck3.val() : userSnapCheck3.val();
-                        if (userObjCheck3 && userObjCheck3.Status) finalApp = 'ADDED';
-                      } catch (e) { console.warn('Failed to check user Status when creating new driver', e); }
+                        // Only mark as ADDED if IsApplying === false AND IsActive === true
+                        if (userObjCheck3 && userObjCheck3.IsActive === true) {
+                          // Check driver record's IsApplying flag
+                          const tmpDrvSnap = await window.dbGet(window.dbRef(window.db, `drivers/${newDrvId}`));
+                          // For new driver, IsApplying defaults to true, so won't be ADDED yet
+                          finalApp = 'TO REVIEW';
+                        }
+                      } catch (e) { console.warn('Failed to check user IsActive when creating new driver', e); }
                     }
                   } catch (e) {}
 
@@ -746,12 +786,13 @@
                     TricyclePlateNumber: payload.plate || '',
                     TricycleNumber: payload.tricycleNumber || payload.plate || '',
                     FranchiseExpiry: payload.franchiseExpiry || '',
-                    IsApplying: finalApp === 'ADDED' ? false : true,
-                    ApplicationStatus: finalApp,
+                    IsApplying: true,
+                    ApplicationStatus: 'TO REVIEW',
+                    Status: 'Active',
                     CreatedAt: new Date().toISOString()
                   };
                   await window.dbSet(window.dbRef(window.db, `drivers/${newDrvId}`), drvPayload);
-                  if (userIdVal || userIdVal2) await window.dbUpdate(window.dbRef(window.db, `users/${userIdVal || userIdVal2}`), { DriverID: newDrvId, RoleID: 2 });
+                  if (userIdVal || userIdVal2) await window.dbUpdate(window.dbRef(window.db, `users/${userIdVal || userIdVal2}`), { DriverID: newDrvId, RoleID: 2, Role: 'Driver' });
                   try { const driversSnap = await window.dbGet(window.dbRef(window.db, 'drivers')); setRawDrivers(driversSnap.val() || {}); } catch(e) {}
 
                   try {
@@ -835,7 +876,9 @@
             MobileNumber: selected.contact || '',
             Email: selected.email || '',
             RoleID: 2,
+            Role: 'Driver',
             Password: selected.password || '',
+            Status: 'Active',
             CreatedAt: new Date().toISOString(),
             IsActive: false
           };
@@ -857,7 +900,10 @@
             LicenseNumber: selected.license || '',
             TricyclePlateNumber: selected.plate || '',
             TricycleNumber: selected.tricycleNumber || selected.plate || '',
-            ApplicationStatus: 'APPROVED',
+            ApplicationStatus: 'TO REVIEW',
+            Status: 'Active',
+            FranchiseExpiry: '',
+            IsApplying: true,
             CreatedAt: new Date().toISOString()
           };
 
@@ -1030,14 +1076,20 @@
         if (!window.db || !window.dbRef || !window.dbOnValue) return;
         const driversRef = window.dbRef(window.db, 'drivers');
         const usersRef = window.dbRef(window.db, 'users');
-        const unsubD = window.dbOnValue(driversRef, snap => setRawDrivers(snap.val() || {}));
-        const unsubU = window.dbOnValue(usersRef, snap => setRawUsers(snap.val() || {}));
+        const unsubD = window.dbOnValue(driversRef, snap => {
+          try { console.debug('Real-time drivers listener triggered, driver count:', Object.keys(snap.val() || {}).length); } catch(e) {}
+          setRawDrivers(snap.val() || {});
+        });
+        const unsubU = window.dbOnValue(usersRef, snap => {
+          try { console.debug('Real-time users listener triggered, user count:', Object.keys(snap.val() || {}).length); } catch(e) {}
+          setRawUsers(snap.val() || {});
+        });
         return () => { try { unsubD(); } catch(e) {} try { unsubU(); } catch(e) {} };
       }, []);
 
       // Recompute membership list from drivers only: require numeric driver IDs and a valid, findable UserID
       React.useEffect(() => {
-        try { console.debug('Recomputing membership from rawDrivers', Object.keys(rawDrivers||{}).length); } catch(e) {}
+        try { console.debug('Recomputing membership from rawDrivers, total drivers:', Object.keys(rawDrivers||{}).length, 'total users:', Object.keys(rawUsers||{}).length); } catch(e) {}
         const items = [];
         const driversVal = rawDrivers || {};
         const usersVal = rawUsers || {};
@@ -1060,6 +1112,8 @@
           const plate = drv.TricyclePlateNumber || drv.TricycleNumber || '';
           const franchiseExpiry = drv.FranchiseExpiry || '';
           const appStatusRaw = drv.ApplicationStatus || drv.Status || 'TO REVIEW';
+
+          try { console.debug(`Driver ${drvId} (${name}): ApplicationStatus=${appStatusRaw}, IsApplying=${drv.IsApplying}, franchiseExpiry=${franchiseExpiry}`); } catch(e) {}
 
           const franchiseHasExpired = isDateExpired(franchiseExpiry);
           const displayStatus = franchiseHasExpired ? 'EXPIRED' : appStatusRaw;
@@ -1755,6 +1809,8 @@
             Email: emailPrepared,
             MobileNumber: phoneRaw,
             RoleID: 2,
+            Role: 'Driver',
+            Status: 'Active',
             Password: password || '',
             CreatedAt: new Date().toISOString(),
             IsActive: false
@@ -1780,6 +1836,7 @@
             TricycleNumber: '',
             FranchiseExpiry: '',
             IsApplying: true,
+            Status: 'Active',
             ApplicationStatus: 'TO REVIEW',
             CreatedAt: new Date().toISOString()
           };
