@@ -999,8 +999,8 @@
           .map(([userId, u]) => {
             if (!u) return null;
             if (String(u.RoleID) !== '2') return null;
-            // Don't filter out inactive users - we want to display their status
-            // if (!u.IsActive) return null;
+            // Only include drivers whose linked user record is active
+            if (!u.IsActive) return null;
             if (u.DeletedAt) return null;
 
             let drvKey = null;
@@ -1016,20 +1016,23 @@
             const contact = u ? u.MobileNumber : '';
             const franchiseExpiry = drvRec ? (drvRec.FranchiseExpiry || '') : '';
             
-            // Check if franchise has expired OR if ApplicationStatus is EXPIRED or REJECTED
+            // Determine status primarily from the user record; fall back to driver application status and franchise expiry
             const franchiseHasExpired = isDateExpired(franchiseExpiry);
             const appStatus = (drvRec ? (drvRec.ApplicationStatus || drvRec.Status || '') : '').toString().toUpperCase();
+            const userStatusRaw = (u.Status || '').toString().toUpperCase();
+
             const isAppStatusExpired = appStatus.includes('EXPIRED');
             const isAppStatusRejected = appStatus.includes('REJECTED');
-            
+            const isUserStatusExpired = userStatusRaw.includes('EXPIRED');
+            const isUserStatusRejected = userStatusRaw.includes('REJECTED');
+
             let status = 'Inactive';
-            if (drvRec) {
-              // If ApplicationStatus is EXPIRED, REJECTED (set by TODA Officer), or franchise has expired, mark as Inactive
-              if (isAppStatusExpired || isAppStatusRejected || franchiseHasExpired) {
-                status = 'Inactive'; // Expired or Rejected = Inactive
-              } else if (drvRec.Status === 'Active' || appStatus.includes('ADDED')) {
-                status = 'Active';
-              }
+            if (isUserStatusExpired || isUserStatusRejected || isAppStatusExpired || isAppStatusRejected || franchiseHasExpired) {
+              status = 'Inactive';
+            } else if (userStatusRaw.includes('ACTIVE') || appStatus.includes('ADDED') || (drvRec && drvRec.Status === 'Active')) {
+              status = 'Active';
+            } else {
+              status = u.IsActive ? 'Active' : 'Inactive';
             }
 
             return {
@@ -1044,7 +1047,7 @@
               isActiveUser: !!u.IsActive,
               registeredDate: u.CreatedAt || '' ,
               franchiseExpiry: franchiseExpiry,
-              isExpired: franchiseHasExpired || isAppStatusExpired || isAppStatusRejected
+              isExpired: franchiseHasExpired || isAppStatusExpired || isAppStatusRejected || isUserStatusExpired || isUserStatusRejected
             };
           })
           .filter(Boolean);
@@ -1070,18 +1073,18 @@
               newStatus = 'REJECTED';
             }
             
+            // Update the driver application status and mark the linked user as inactive (Status moved to users/)
             window.dbUpdate(driverRef, {
-              Status: 'Inactive',
-              IsActive: false,
               ApplicationStatus: newStatus
-            }).catch(err => console.error('Error auto-expiring/rejecting driver:', err));
-            
-            // Also update the user's IsActive status
+            }).catch(err => console.error('Error updating driver ApplicationStatus:', err));
+
+            // Also update the user's Status and IsActive
             if (driver.userId) {
               const userRef = window.dbRef(window.db, `users/${driver.userId}`);
               window.dbUpdate(userRef, {
+                Status: newStatus,
                 IsActive: false
-              }).catch(err => console.error('Error updating user IsActive status:', err));
+              }).catch(err => console.error('Error updating user Status/IsActive:', err));
             }
           }
         });

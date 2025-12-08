@@ -891,6 +891,92 @@
         }
       };
 
+      // Delete user and related database records (users, drivers, applications, audit logs)
+      const deleteUser = async () => {
+        if (!selected) return;
+        if (!window.adminAllowed) {
+          window.showAlert('Admin session unavailable. Sign in with an admin account or enable anonymous admin sign-in.', 'error');
+          return;
+        }
+
+        setShowDeleteConfirm(false);
+        setIsProcessing(true);
+        try {
+          // Resolve userId and driverId from selected
+          const userId = selected.UserID || (selected.id && selected.id.startsWith('user-') ? selected.id.replace(/^user-/, '') : (selected.userId || null));
+          const drvId = selected.drvId || (selected.id && selected.id.startsWith('drv-') ? selected.id.replace(/^drv-/, '') : null);
+
+          // Delete user record
+          if (userId) {
+            try {
+              await window.dbSet(window.dbRef(window.db, `users/${userId}`), null);
+            } catch (e) { console.warn('Failed to delete users/' + userId, e); }
+          }
+
+          // Delete drivers that reference this user
+          if (userId) {
+            try {
+              const driversSnap = await window.dbGet(window.dbRef(window.db, 'drivers'));
+              const driversVal = driversSnap.val() || {};
+              for (const [k, d] of Object.entries(driversVal)) {
+                if (!d) continue;
+                if (String(d.UserID) === String(userId)) {
+                  try { await window.dbSet(window.dbRef(window.db, `drivers/${k}`), null); } catch(e) { console.warn('Failed to delete drivers/' + k, e); }
+                }
+              }
+            } catch (e) { console.warn('Failed to enumerate drivers for deletion', e); }
+          }
+
+          // Delete explicit driver id if present
+          if (drvId) {
+            try { await window.dbSet(window.dbRef(window.db, `drivers/${drvId}`), null); } catch(e) { console.warn('Failed to delete drivers/' + drvId, e); }
+          }
+
+          // Delete applications entries referencing the user or matching selected.id
+          try {
+            const appsSnap = await window.dbGet(window.dbRef(window.db, 'applications'));
+            const appsVal = appsSnap.val() || {};
+            for (const [k, a] of Object.entries(appsVal)) {
+              if (!a) continue;
+              if ((a.UserID && String(a.UserID) === String(userId)) || (selected.id && k === selected.id)) {
+                try { await window.dbSet(window.dbRef(window.db, `applications/${k}`), null); } catch(e) { console.warn('Failed to delete applications/' + k, e); }
+              }
+            }
+          } catch (e) { console.warn('Failed to enumerate applications for deletion', e); }
+
+          // Optionally remove related auditLogs entries
+          try {
+            const logsSnap = await window.dbGet(window.dbRef(window.db, 'auditLogs'));
+            const logsVal = logsSnap.val() || {};
+            for (const [k, l] of Object.entries(logsVal)) {
+              if (!l) continue;
+              if ((drvId && String(l.DriverID) === String(drvId)) || (userId && String(l.UserID) === String(userId))) {
+                try { await window.dbSet(window.dbRef(window.db, `auditLogs/${k}`), null); } catch(e) { console.warn('Failed to delete auditLogs/' + k, e); }
+              }
+            }
+          } catch (e) { console.warn('Failed to enumerate auditLogs for deletion', e); }
+
+          // Update local members list to remove deleted entry
+          try {
+            setMembers(prev => (prev || []).filter(m => {
+              if (!m) return false;
+              if (userId && (m.userId && String(m.userId) === String(userId))) return false;
+              if (userId && (m.userId === userId)) return false;
+              if (selected.id && m.id === selected.id) return false;
+              return true;
+            }));
+          } catch(e) { console.warn('Failed to update local members state', e); }
+
+          window.showAlert('User and related database records removed.', 'success');
+          closeModal();
+        } catch (err) {
+          console.error('Error deleting user and related records:', err);
+          window.showAlert('Error deleting user: ' + (err && err.message ? err.message : err), 'error');
+        } finally {
+          setIsProcessing(false);
+        }
+      };
+
       // Load user info from sessionStorage
       React.useEffect(() => {
         const storedName = sessionStorage.getItem('userName') || 'TODA Officer';
@@ -901,6 +987,7 @@
       const [rawDrivers, setRawDrivers] = React.useState({});
       const [rawUsers, setRawUsers] = React.useState({});
       const [isProcessing, setIsProcessing] = React.useState(false);
+      const [showDeleteConfirm, setShowDeleteConfirm] = React.useState(false);
       const [showAddApplicantModal, setShowAddApplicantModal] = React.useState(false);
 
       // Helper function for status colors (matches Driver Application)
@@ -948,88 +1035,44 @@
         return () => { try { unsubD(); } catch(e) {} try { unsubU(); } catch(e) {} };
       }, []);
 
-      // Recompute merged applicants list whenever users or drivers change
-      // Only drivers (RoleID === 2) are shown in membership; applicants are derived from users where RoleID === 2
+      // Recompute membership list from drivers only: require numeric driver IDs and a valid, findable UserID
       React.useEffect(() => {
-        try { console.debug('Recomputing applicants from rawUsers/rawDrivers', Object.keys(rawUsers||{}).length, Object.keys(rawDrivers||{}).length); } catch(e) {}
-        const usersVal = rawUsers || {};
+        try { console.debug('Recomputing membership from rawDrivers', Object.keys(rawDrivers||{}).length); } catch(e) {}
         const items = [];
+        const driversVal = rawDrivers || {};
+        const usersVal = rawUsers || {};
 
-        for (const [userId, userRec] of Object.entries(usersVal)) {
+        for (const [drvId, drv] of Object.entries(driversVal)) {
+          if (!drv) continue;
+          // Only accept drivers whose key is a numeric integer id
+          if (!/^\d+$/.test(String(drvId))) continue;
+
+          // Must have a UserID that maps to an existing user record
+          const userId = drv.UserID || drv.userId || null;
+          if (!userId) continue;
+          const userRec = usersVal[String(userId)];
           if (!userRec) continue;
-          // Only consider users with RoleID === 2 (driver role)
-          if (String(userRec.RoleID) !== '2') continue;
           if (userRec.DeletedAt) continue;
 
-          // find driver record for this user (if any)
-          let drvEntry = null;
-          for (const [drvId, drv] of Object.entries(rawDrivers || {})) {
-            if (!drv) continue;
-            if (String(drv.UserID) === String(userId)) {
-              drvEntry = { id: drvId, rec: drv };
-              break;
-            }
-          }
+          const name = [userRec.Firstname, userRec.Middlename, userRec.Lastname].filter(Boolean).join(' ') || drv.Name || drv.name || 'Applicant';
+          const contact = userRec.MobileNumber || drv.MobileNumber || userRec.contact || drv.contact || '';
+          const license = drv.LicenseNumber || drv.license || '';
+          const plate = drv.TricyclePlateNumber || drv.TricycleNumber || '';
+          const franchiseExpiry = drv.FranchiseExpiry || '';
+          const appStatusRaw = drv.ApplicationStatus || drv.Status || 'TO REVIEW';
 
-          const name = [userRec.Firstname, userRec.Middlename, userRec.Lastname].filter(Boolean).join(' ') || userRec.name || 'Applicant';
-          const contact = userRec.MobileNumber || userRec.contact || '';
-          const license = drvEntry ? (drvEntry.rec.LicenseNumber || drvEntry.rec.license || '') : '';
-          const plate = drvEntry ? (drvEntry.rec.TricyclePlateNumber || drvEntry.rec.TricycleNumber || '') : '';
-          const franchiseExpiry = drvEntry ? (drvEntry.rec.FranchiseExpiry || '') : '';
-          const appStatus = drvEntry ? (drvEntry.rec.ApplicationStatus || drvEntry.rec.Status || 'TO REVIEW') : 'TO REVIEW';
-
-          // Check if franchise has expired - override status to EXPIRED if it has
           const franchiseHasExpired = isDateExpired(franchiseExpiry);
-          const displayStatus = franchiseHasExpired ? 'EXPIRED' : appStatus;
+          const displayStatus = franchiseHasExpired ? 'EXPIRED' : appStatusRaw;
 
           const statusRaw = (displayStatus || 'TO REVIEW').toString();
           const status = formatStatusForDisplay(displayStatus);
           const initials = (name || 'Applicant').split(' ').map(n => n[0]||'').join('').slice(0,2).toUpperCase();
 
           items.push({
-            id: `user-${userId}`,
-            userId: userId,
-            drvId: drvEntry ? drvEntry.id : null,
-            name,
-            email: userRec.Email || userRec.email || '',
-            contact,
-            license,
-            plate,
-            status,
-            ApplicationStatus: displayStatus,
-            Status: statusRaw,
-            registeredDate: formatIsoForDisplay(userRec.CreatedAt || ''),
-            franchiseExpiry,
-            initials,
-            color: getStatusColor(status),
-            files: drvEntry && drvEntry.rec.files ? drvEntry.rec.files : {},
-            isExpired: franchiseHasExpired
-          });
-        }
-
-        // Also include any drivers that reference users not present (defensive)
-        for (const [drvId, drv] of Object.entries(rawDrivers || {})) {
-          if (!drv) continue;
-          if (drv.UserID && rawUsers && rawUsers[String(drv.UserID)]) continue; // already included
-          const name = drv.Name || drv.name || 'Applicant';
-          const contact = drv.MobileNumber || drv.contact || '';
-          const license = drv.LicenseNumber || drv.license || '';
-          const plate = drv.TricyclePlateNumber || drv.TricycleNumber || '';
-          const franchiseExpiry = drv.FranchiseExpiry || '';
-          const appStatusRaw = drv.ApplicationStatus || drv.Status || 'TO REVIEW';
-          
-          // Check if franchise has expired
-          const franchiseHasExpired = isDateExpired(franchiseExpiry);
-          const displayStatus = franchiseHasExpired ? 'EXPIRED' : appStatusRaw;
-          
-          const statusRaw = displayStatus.toString();
-          const status = formatStatusForDisplay(displayStatus);
-          const initials = (name || 'Applicant').split(' ').map(n => n[0]||'').join('').slice(0,2).toUpperCase();
-          items.push({
             id: `drv-${drvId}`,
             drvId,
-            userId: drv.UserID || null,
-            email: drv.Email || drv.email || '',
+            userId: String(userId),
+            email: userRec.Email || userRec.email || drv.Email || drv.email || '',
             name,
             contact,
             license,
@@ -1037,7 +1080,7 @@
             status,
             ApplicationStatus: displayStatus,
             Status: statusRaw,
-            registeredDate: formatIsoForDisplay(drv.CreatedAt || ''),
+            registeredDate: formatIsoForDisplay(drv.CreatedAt || userRec.CreatedAt || ''),
             franchiseExpiry: franchiseExpiry,
             initials,
             color: getStatusColor(status),
@@ -1487,9 +1530,9 @@
                         <table className="w-full border-collapse">
                           <thead>
                             <tr className="bg-[#252d42]">
-                              <th className="px-6 py-4 text-left text-white font-semibold">Requirement</th>
-                              <th className="px-6 py-4 text-left text-white font-semibold">Date Submitted</th>
-                              <th className="px-6 py-4 text-left text-white font-semibold">File</th>
+                              <th className="px-6 py-4 text-left text-white font-semibold w-2/5">Requirement</th>
+                              <th className="px-6 py-4 text-center text-white font-semibold w-1/5">Date Submitted</th>
+                              <th className="px-6 py-4 text-center text-white font-semibold w-2/5">File</th>
                             </tr>
                           </thead>
                           <tbody>
@@ -1505,10 +1548,28 @@
                       <div className="flex justify-between">
                         <button onClick={closeModal} className="bg-red-600 hover:bg-red-700 px-8 py-3 rounded-lg font-semibold text-white">Cancel</button>
                         <div className="flex items-center gap-3">
+                          <button onClick={() => setShowDeleteConfirm(true)} className="bg-red-700 hover:bg-red-800 px-6 py-3 rounded-lg font-semibold text-white">Delete</button>
                           <button onClick={saveChanges} className="bg-green-600 hover:bg-green-700 px-8 py-3 rounded-lg font-semibold text-white">Save Changes</button>
                         </div>
                       </div>
 
+                    </div>
+                  </div>
+                )}
+
+                {/* Delete Confirmation Modal (styled) */}
+                {showDeleteConfirm && selected && (
+                  <div className="fixed inset-0 bg-black bg-opacity-80 flex justify-center items-center z-50">
+                    <div className="bg-[#1e2538] p-6 rounded-xl w-[520px]">
+                      <div className="flex justify-between items-center mb-4">
+                        <h3 className="text-xl font-bold text-white">Confirm Delete</h3>
+                        <button onClick={() => setShowDeleteConfirm(false)} className="text-gray-400 hover:text-white text-2xl font-light">×</button>
+                      </div>
+                      <p className="text-gray-300 mb-6">Are you sure you want to delete <span className="font-semibold text-white">{selected.name || 'this user'}</span>? This will remove their records from the database.</p>
+                      <div className="flex justify-end gap-3">
+                        <button onClick={() => setShowDeleteConfirm(false)} className="bg-gray-600 hover:bg-gray-700 px-6 py-2 rounded text-white">Cancel</button>
+                        <button onClick={deleteUser} className="bg-red-700 hover:bg-red-800 px-6 py-2 rounded font-semibold text-white">Delete</button>
+                      </div>
                     </div>
                   </div>
                 )}
@@ -1885,8 +1946,9 @@
       if (missing || !doc) {
         return (
           <tr className="bg-[#151b28] hover:bg-[#1a202e]">
-            <td className="px-6 py-4 text-gray-300 font-medium">{requirement}</td>
-            <td className="px-6 py-4 text-center" colSpan="2">
+              <td className="px-6 py-4 text-gray-300 font-medium w-2/5">{requirement}</td>
+              <td className="px-6 py-4 text-center text-gray-400 w-1/5">—</td>
+              <td className="px-6 py-4 text-center w-2/5">
               <div className="flex items-center justify-center gap-2">
                 <span className="bg-red-600 px-4 py-2 rounded-lg text-sm font-bold text-white">NOT SUBMITTED</span>
               </div>
@@ -2033,11 +2095,11 @@
         applyTransform();
       };
 
-      return (
-        <tr className="bg-[#151b28] hover:bg-[#1a202e]">
-          <td className="px-6 py-4 text-gray-300 font-medium">{requirement}</td>
-          <td className="px-6 py-4 text-gray-400">{modifiedDate}</td>
-          <td className="px-6 py-4">
+        return (
+          <tr className="bg-[#151b28] hover:bg-[#1a202e]">
+            <td className="px-6 py-4 text-gray-300 font-medium w-2/5">{requirement}</td>
+            <td className="px-6 py-4 text-center text-gray-400 w-1/5">{modifiedDate}</td>
+            <td className="px-6 py-4 w-2/5">
             {doc.downloadUrl ? (
               <div className="flex items-center justify-between">
                 <div className="flex items-center gap-3 text-yellow-500">
@@ -2055,7 +2117,9 @@
                 </div>
               </div>
             ) : (
-              <span className="text-gray-400 text-sm">URL unavailable</span>
+              <div className="flex items-center justify-center">
+                <span className="text-gray-400 text-sm">URL unavailable</span>
+              </div>
             )}
           </td>
         </tr>
