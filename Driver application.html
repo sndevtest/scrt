@@ -41,7 +41,12 @@
     const storage = getStorage(app);
 
     // Admin session flags
-    window.adminAllowed = false; // whether admin operations are allowed (only authenticated admin user with RoleID = 4)
+    // By default admin access is denied. For local debugging/viewing you can bypass
+    // the gate by opening this page with `?unlock=true` or by setting
+    // `localStorage.setItem('adminUnlock', '1')` in the console.
+    const _urlParams = (typeof window !== 'undefined' && window.location && window.location.search) ? new URLSearchParams(window.location.search) : new URLSearchParams('');
+    const _devUnlock = _urlParams.get('unlock') === 'true' || (typeof localStorage !== 'undefined' && localStorage.getItem && localStorage.getItem('adminUnlock') === '1');
+    window.adminAllowed = !!_devUnlock; // whether admin operations are allowed (only authenticated admin user with RoleID = 4)
     window.adminAnonymousAvailable = false; // whether anonymous sign-in is available (DEPRECATED - do not use)
 
     // NOTE: Anonymous sign-in is DISABLED in Firebase Console to enforce role-based access control.
@@ -919,7 +924,8 @@
                     const userRefCheck = window.dbRef(window.db, `users/${linkedUserId}`);
                     const userSnapCheck = await window.dbGet(userRefCheck);
                     const userObjCheck = userSnapCheck.exists() ? userSnapCheck.val() : {};
-                    if (userObjCheck && userObjCheck.IsActive) {
+                    // Only mark ADDED when driver record indicates IsApplying === false and user is active
+                    if (drvRec && typeof drvRec.IsApplying !== 'undefined' && drvRec.IsApplying === false && userObjCheck && userObjCheck.IsActive) {
                       finalAppStatus = 'ADDED';
                     }
                   } catch (e) {
@@ -1084,12 +1090,14 @@
               let finalApp = appStatus;
               try {
                 const s2 = (appStatus || '').toString().toUpperCase();
+                const drvRecLocal = rawDrivers && rawDrivers[String(drvKey)];
                 if (s2.includes('APPROVED') && userIdVal) {
                   try {
                     const userRefCheck2 = window.dbRef(window.db, `users/${userIdVal}`);
                     const userSnapCheck2 = await window.dbGet(userRefCheck2);
                     const userObjCheck2 = userSnapCheck2.exists() ? userSnapCheck2.val() : {};
-                    if (userObjCheck2 && userObjCheck2.IsActive) {
+                    // Only mark ADDED when driver IsApplying is false and user IsActive is true
+                    if (drvRecLocal && typeof drvRecLocal.IsApplying !== 'undefined' && drvRecLocal.IsApplying === false && userObjCheck2 && userObjCheck2.IsActive) {
                       finalApp = 'ADDED';
                     }
                   } catch (e) { console.warn('Failed to check user IsActive for applicant->driver update', e); }
@@ -1175,14 +1183,9 @@
                 try {
                   const sCheck = (appStatus || '').toString().toUpperCase();
                   if (sCheck.includes('APPROVED') && userIdVal) {
-                    try {
-                      const userRefCheck3 = window.dbRef(window.db, `users/${userIdVal}`);
-                      const userSnapCheck3 = await window.dbGet(userRefCheck3);
-                      const userObjCheck3 = userSnapCheck3.exists() ? userSnapCheck3.val() : {};
-                      if (userObjCheck3 && userObjCheck3.IsActive) {
-                        finalApp = 'ADDED';
-                      }
-                    } catch (e) { console.warn('Failed to check user IsActive when creating new driver', e); }
+                    // Default to APPROVED for newly created driver records. They should only be ADDED
+                    // when driver.IsApplying === false and user.IsActive === true.
+                    finalApp = 'APPROVED';
                   }
                 } catch (e) {}
 
@@ -1333,6 +1336,8 @@
             TricyclePlateNumber: selected.plate || '',
             TricycleNumber: selected.tricycleNumber || selected.plate || '',
             ApplicationStatus: 'APPROVED',
+            // Mark driver record active when approved via admin flow
+            Status: 'Active',
             // Driver-level IsActive/IsOnline are not stored here. User record owns IsActive.
             CreatedAt: new Date().toISOString()
           };
@@ -1343,7 +1348,9 @@
 
           // Update user record to include DriverID reference
           try {
-            await window.dbUpdate(userRef, { DriverID: driverId, RoleID: 2 });
+            // When approving and adding via admin, activate the user account so it appears
+            // in Admin Driver Management (which filters by users/<id>.IsActive)
+            await window.dbUpdate(userRef, { DriverID: driverId, RoleID: 2, IsActive: true, Status: 'Active' });
           } catch (e) {
             console.warn('Failed to update user with DriverID/RoleID after adding driver', e);
           }
@@ -1447,7 +1454,7 @@
                 </svg>
                 Passengers
               </a>
-              <!-- Membership link removed for admin; TODA Officer has separate membership UI -->
+              {/* Membership link removed for admin; TODA Officer has separate membership UI */}
               <a href="booking management.html" className={getLinkClass("booking management.html")}>
                 <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                   <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2" />
