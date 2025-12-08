@@ -183,6 +183,22 @@
       return str;
     };
 
+    // Helper: check if franchise expiry date has passed (includes expiry date itself)
+    const isDateExpired = (dateString) => {
+      if (!dateString) return false;
+      try {
+        const expiryDate = new Date(dateString);
+        const today = new Date();
+        // Set today to midnight to compare dates only
+        today.setHours(0, 0, 0, 0);
+        expiryDate.setHours(0, 0, 0, 0);
+        // Return true if expiry date <= today (expired on or after expiry date)
+        return expiryDate <= today;
+      } catch (e) {
+        return false;
+      }
+    };
+
     const ImportApprovedModal = ({ onClose, approvedApplications, drivers }) => {
       const [importing, setImporting] = useState({});
 
@@ -812,9 +828,10 @@
     };
 
     const AdminDashboard = () => {
-      const [currentTab, setCurrentTab] = useState('drivers');
+      const [currentTab, setCurrentTab] = useState('overview');
       const [selectedDriver, setSelectedDriver] = useState(null);
       const [selectedDriverIndex, setSelectedDriverIndex] = useState(null);
+      const [selectedBooking, setSelectedBooking] = useState(null);
       const [showExportModal, setShowExportModal] = useState(false);
       const [showAddModal, setShowAddModal] = useState(false);
       const [confirmDelete, setConfirmDelete] = useState({ open: false, index: null });
@@ -858,6 +875,12 @@
       // Logs search state
       const [logsSearchTerm, setLogsSearchTerm] = useState("");
       const [filteredLogs, setFilteredLogs] = useState([]);
+      
+      // Driver filtering states
+      const [showDriverFilterModal, setShowDriverFilterModal] = useState(false);
+      const [driverStatusFilters, setDriverStatusFilters] = useState({ Active: true, Inactive: false });
+      const [driverOnlineFilters, setDriverOnlineFilters] = useState({ Online: true, Offline: false });
+      const [filteredDrivers, setFilteredDrivers] = useState([]);
 
       useEffect(() => {
         if (!window.db || !window.dbRef || !window.dbOnValue) return;
@@ -976,7 +999,8 @@
           .map(([userId, u]) => {
             if (!u) return null;
             if (String(u.RoleID) !== '2') return null;
-            if (!u.IsActive) return null;
+            // Don't filter out inactive users - we want to display their status
+            // if (!u.IsActive) return null;
             if (u.DeletedAt) return null;
 
             let drvKey = null;
@@ -990,7 +1014,23 @@
             const tricycle = drvRec ? (drvRec.TricyclePlateNumber || drvRec.TricycleNumber || '') : '';
             const license = drvRec ? (drvRec.LicenseNumber || '') : '';
             const contact = u ? u.MobileNumber : '';
-            const status = drvRec && (drvRec.Status === 'Active' || (drvRec.ApplicationStatus || '').toString().toUpperCase().includes('ADDED')) ? 'Active' : 'Inactive';
+            const franchiseExpiry = drvRec ? (drvRec.FranchiseExpiry || '') : '';
+            
+            // Check if franchise has expired OR if ApplicationStatus is EXPIRED or REJECTED
+            const franchiseHasExpired = isDateExpired(franchiseExpiry);
+            const appStatus = (drvRec ? (drvRec.ApplicationStatus || drvRec.Status || '') : '').toString().toUpperCase();
+            const isAppStatusExpired = appStatus.includes('EXPIRED');
+            const isAppStatusRejected = appStatus.includes('REJECTED');
+            
+            let status = 'Inactive';
+            if (drvRec) {
+              // If ApplicationStatus is EXPIRED, REJECTED (set by TODA Officer), or franchise has expired, mark as Inactive
+              if (isAppStatusExpired || isAppStatusRejected || franchiseHasExpired) {
+                status = 'Inactive'; // Expired or Rejected = Inactive
+              } else if (drvRec.Status === 'Active' || appStatus.includes('ADDED')) {
+                status = 'Active';
+              }
+            }
 
             return {
               id: drvKey || `user-${userId}`,
@@ -1003,7 +1043,8 @@
               status,
               isActiveUser: !!u.IsActive,
               registeredDate: u.CreatedAt || '' ,
-              franchiseExpiry: drvRec ? (drvRec.FranchiseExpiry || '') : ''
+              franchiseExpiry: franchiseExpiry,
+              isExpired: franchiseHasExpired || isAppStatusExpired || isAppStatusRejected
             };
           })
           .filter(Boolean);
@@ -1011,6 +1052,40 @@
         setDrivers(driversArr);
         window.drivers = driversArr;
       }, [rawUsers, rawDrivers]);
+
+      // Auto-expire/reject drivers when franchise expiry date has passed or status is REJECTED
+      useEffect(() => {
+        if (!window.db || !window.dbRef || !window.dbUpdate) return;
+        
+        drivers.forEach(driver => {
+          if (driver.isExpired && driver.driverId && driver.status === 'Active') {
+            // Driver's franchise has expired or is rejected but status is still Active - update it
+            const driverRef = window.dbRef(window.db, `drivers/${driver.driverId}`);
+            const driverRec = rawDrivers && rawDrivers[driver.driverId];
+            const currentAppStatus = (driverRec ? (driverRec.ApplicationStatus || driverRec.Status || '') : '').toString().toUpperCase();
+            
+            // If already REJECTED, don't overwrite it. Otherwise, set to EXPIRED if franchise expired
+            let newStatus = 'EXPIRED';
+            if (currentAppStatus.includes('REJECTED')) {
+              newStatus = 'REJECTED';
+            }
+            
+            window.dbUpdate(driverRef, {
+              Status: 'Inactive',
+              IsActive: false,
+              ApplicationStatus: newStatus
+            }).catch(err => console.error('Error auto-expiring/rejecting driver:', err));
+            
+            // Also update the user's IsActive status
+            if (driver.userId) {
+              const userRef = window.dbRef(window.db, `users/${driver.userId}`);
+              window.dbUpdate(userRef, {
+                IsActive: false
+              }).catch(err => console.error('Error updating user IsActive status:', err));
+            }
+          }
+        });
+      }, [drivers, rawDrivers]);
 
       // Derive bookings array for stats calculation
       useEffect(() => {
@@ -1028,17 +1103,19 @@
             let passengerUser = null;
             let passengerUserId = null;
             try {
-              // Prefer booking.UserID when available
+              // Prefer booking.userId first
               if (b.userId && rawUsers && rawUsers[b.userId]) {
                 passengerUserId = String(b.userId);
                 passengerUser = rawUsers[b.userId];
-              } else if (b.PassengerID) {
+              } 
+              // Then try PassengerID -> rawPassengers -> UserID
+              else if (b.PassengerID) {
                 const passengerRec = rawPassengers && rawPassengers[b.PassengerID];
                 if (passengerRec && passengerRec.UserID && rawUsers && rawUsers[passengerRec.UserID]) {
                   passengerUserId = String(passengerRec.UserID);
                   passengerUser = rawUsers[passengerUserId];
                 } else {
-                  // Search users for matching PassengerID (in case passengers node is not authoritative)
+                  // Fallback: search users for matching PassengerID
                   Object.entries(rawUsers || {}).some(([uId, u]) => {
                     if (u && u.PassengerID && String(u.PassengerID) === String(b.PassengerID)) {
                       passengerUserId = uId;
@@ -1054,10 +1131,29 @@
               passengerUserId = null;
             }
 
-            // Get driver info using driverId from bookings path
-            const driverId = b.driverId || b.DriverID;
-            const driverRec = driverId ? (rawDrivers && rawDrivers[driverId]) : null;
-            const driverUser = driverRec ? rawUsers[driverRec.UserID] : null;
+            // Get driver info using driverId from bookings path - try multiple field names
+            let driverId = b.driverId || b.DriverID || null;
+            let driverRec = null;
+            let driverUser = null;
+            
+            if (driverId) {
+              driverRec = rawDrivers && rawDrivers[driverId];
+              if (driverRec && driverRec.UserID) {
+                driverUser = rawUsers && rawUsers[driverRec.UserID];
+              }
+            }
+            
+            // If driver not found by ID, try to search drivers by matching user
+            if (!driverRec && b.DriverID) {
+              for (const [k, d] of Object.entries(rawDrivers || {})) {
+                if (String(d.UserID) === String(b.DriverID)) {
+                  driverId = k;
+                  driverRec = d;
+                  driverUser = rawUsers && rawUsers[d.UserID];
+                  break;
+                }
+              }
+            }
 
             // Format date/time and compute timestamp
             const requested = b.RequestedAt || '';
@@ -1078,7 +1174,7 @@
 
             // Prefer a driverSnapshot stored on the booking (backfilled or captured at assignment time)
             const dSnap = b.driverSnapshot || null;
-            let driverName = 'N/A';
+            let driverName = 'Driver';
             let driverTricycle = 'N/A';
             let driverLicense = 'N/A';
             if (dSnap && dSnap.name) {
@@ -1092,10 +1188,13 @@
             }
 
             const makeFullNameLocal = (u) => {
-              if (!u) return 'Unknown';
-              return [u.Firstname, u.Middlename, u.Lastname].filter(Boolean).join(' ');
+              if (!u) return null;
+              const name = [u.Firstname, u.Middlename, u.Lastname].filter(Boolean).join(' ');
+              return name || null;
             };
-            const passengerName = passengerUser ? makeFullNameLocal(passengerUser) : (b.userName || 'Passenger');
+            // Try to get passenger name from user record first, fall back to userName field
+            const passengerName = passengerUser ? makeFullNameLocal(passengerUser) : null;
+            const finalPassengerName = passengerName || b.userName || b.PassengerName || 'Unknown';
             const passengerDisplayId = passengerUserId || b.PassengerID || '';
 
             return {
@@ -1104,8 +1203,8 @@
               raw: b,
               passengerUserId: passengerUserId,
               passengerId: passengerDisplayId,
-              passengerName: passengerName || 'Passenger',
-              passenger: passengerName || 'Passenger',
+              passengerName: finalPassengerName,
+              passenger: finalPassengerName,
               driverName: driverName,
               driver: driverName,
               driverTricycle: driverTricycle,
@@ -1244,18 +1343,29 @@
               historyFormattedDate = `${monthN} ${dayN}, ${yearN} ${timeN}`;
             }
 
-            historyArr.push({
-              passengerId: passengerIdDisplay,
-              passengerName,
-              driverName,
-              fare: `₱ ${Number(b.TotalFare || 0).toFixed(2)}`,
-              tricycleNo: driverRec ? driverRec.TricycleNumber : 'Unknown',
-              pickup: b.PickUpLocation || '',
-              dropOff: b.DropOffLocation || '',
-              payment: 'Cash', // TODO: get from payment table if available
-              rating,
-                date: historyFormattedDate
-            });
+            // Only include completed, cancelled, and pending rides in history
+            // Pending rides are shown temporarily but should be cleared when status changes
+            const bookingStatus = (b.Status || b.status || '').toString().toUpperCase();
+            const isCompleted = bookingStatus.includes('COMPLETED');
+            const isCancelled = bookingStatus.includes('CANCELLED') || bookingStatus.includes('CANCELED');
+            const isPending = bookingStatus.includes('PENDING') || bookingStatus === '';
+            
+            if (isCompleted || isCancelled || isPending) {
+              historyArr.push({
+                passengerId: passengerIdDisplay,
+                passengerName,
+                driverName,
+                fare: `₱ ${Number(b.TotalFare || 0).toFixed(2)}`,
+                tricycleNo: driverRec ? driverRec.TricycleNumber : 'Unknown',
+                pickup: b.PickUpLocation || '',
+                dropOff: b.DropOffLocation || '',
+                payment: 'Cash', // TODO: get from payment table if available
+                rating,
+                date: historyFormattedDate,
+                status: bookingStatus,
+                isPending: isPending
+              });
+            }
           });
 
           setPassengers(passengersArr);
@@ -1349,6 +1459,35 @@
         setFilteredBookings(filtered);
         setShowBookingFilterModal(false);
       };
+
+      // Apply driver filters
+      const applyDriverFilters = () => {
+        let filtered = [...drivers];
+
+        // Filter by active/inactive status
+        filtered = filtered.filter(d => {
+          const isActive = d.isActiveUser;
+          if (isActive && driverStatusFilters.Active) return true;
+          if (!isActive && driverStatusFilters.Inactive) return true;
+          return false;
+        });
+
+        // Filter by online/offline status
+        filtered = filtered.filter(d => {
+          const isOnline = d.status === 'Active';
+          if (isOnline && driverOnlineFilters.Online) return true;
+          if (!isOnline && driverOnlineFilters.Offline) return true;
+          return false;
+        });
+
+        setFilteredDrivers(filtered);
+        setShowDriverFilterModal(false);
+      };
+
+      // Initialize filtered drivers on mount and when drivers change
+      useEffect(() => {
+        setFilteredDrivers(drivers);
+      }, [drivers]);
 
       // Filter rides based on search query and date range - MATCHING passenger management.html logic
       const getFilteredRides = () => {
@@ -1494,6 +1633,16 @@
         setFilteredLogs(filtered);
       }, [logsSearchTerm, auditLogs]);
 
+      // Status badge color helper - MATCHING dashboard.html
+      const statusBadgeClass = (status) => {
+        const s = (status || '').toString().toLowerCase();
+        if (s === 'completed') return 'bg-green-500 text-white';
+        if (s === 'pending') return 'bg-yellow-400 text-black';
+        if (s === 'cancelled' || s === 'canceled') return 'bg-red-600 text-white';
+        if (s.includes('progress')) return 'bg-gray-500 text-white';
+        return 'bg-gray-500 text-white';
+      };
+
       // Handle audit log status change - MATCHING Logs.html logic
       const handleLogStatusChange = (dbKey, currentStatus) => {
         if (!window.db || !window.dbRef || !window.dbUpdate) return;
@@ -1542,7 +1691,8 @@
             name: editedDriver.name,
             contact: editedDriver.contact,
             license: editedDriver.license,
-            tricycle: editedDriver.tricycle
+            tricycle: editedDriver.tricycle,
+            franchiseExpiry: editedDriver.franchiseExpiry
           };
           setDrivers(updatedDrivers);
           setSelectedDriver(null);
@@ -1656,9 +1806,20 @@
                   <p className="text-xs text-gray-400">Admin Dashboard</p>
                 </div>
               </div>
-              <div className="text-right">
-                <p className="text-gray-300">Administrator</p>
-                <p className="text-xs text-gray-500">System Admin</p>
+              <div className="flex items-center gap-6">
+                <div className="text-right">
+                  <p className="text-gray-300">Administrator</p>
+                  <p className="text-xs text-gray-500">System Admin</p>
+                </div>
+                <a 
+                  href="log out.html"
+                  className="bg-red-600 hover:bg-red-700 text-white px-4 py-2 rounded-lg font-semibold transition-colors flex items-center gap-2"
+                >
+                  <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M17 16l4-4m0 0l-4-4m4 4H7m6 4v1a3 3 0 01-3 3H6a3 3 0 01-3-3V7a3 3 0 013-3h4a3 3 0 013 3v1" />
+                  </svg>
+                  Logout
+                </a>
               </div>
             </div>
           </header>
@@ -1750,6 +1911,26 @@
             </div>
           </div>
 
+          {/* Search Bar Section */}
+          {currentTab === 'overview' && (
+            <div className="bg-[#1a1f2e] border-b border-gray-700 sticky top-[57px] z-9">
+              <div className="max-w-7xl mx-auto px-6 py-4">
+                <div className="relative">
+                  <svg className="absolute left-4 top-3.5 w-5 h-5 text-gray-500" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z" />
+                  </svg>
+                  <input
+                    type="text"
+                    placeholder="Search bookings, drivers, passengers, and more..."
+                    value={overviewSearchQuery}
+                    onChange={(e) => setOverviewSearchQuery(e.target.value)}
+                    className="w-full bg-[#252d42] text-white pl-12 pr-4 py-2.5 rounded-lg border border-gray-600 focus:border-yellow-500 focus:outline-none placeholder-gray-500 text-sm"
+                  />
+                </div>
+              </div>
+            </div>
+          )}
+
           {/* Content */}
           <div className="max-w-7xl mx-auto px-6 py-8">
             {currentTab === 'overview' && (
@@ -1824,58 +2005,44 @@
 
                 {/* Search Results */}
 
-                                {/* Search Bar */}
-                                <div className="bg-[#1e2538] rounded-lg p-6 border border-gray-700">
-                                  <div className="flex flex-col sm:flex-row gap-4">
-                                    <div className="flex-1">
-                                      <input
-                                        type="text"
-                                        placeholder="Search bookings, drivers, and passengers..."
-                                        value={overviewSearchQuery}
-                                        onChange={(e) => setOverviewSearchQuery(e.target.value)}
-                                        className="w-full bg-[#252d42] text-white px-4 py-3 rounded-lg border border-gray-600 focus:border-yellow-500 focus:outline-none placeholder-gray-500"
-                                      />
-                                    </div>
-                                  </div>
-                                </div>
-
                 {overviewSearchQuery.trim() !== '' && (
                   <div className="space-y-4">
                     {/* Bookings Results */}
                     {bookings.filter(b => {
                       const query = overviewSearchQuery.toLowerCase();
-                      const passengerUser = b.userId ? rawUsers[b.userId] : (b.PassengerID ? rawPassengers[b.PassengerID]?.UserID ? rawUsers[rawPassengers[b.PassengerID]?.UserID] : null : null);
-                      const passengerName = passengerUser ? [passengerUser.Firstname, passengerUser.Middlename, passengerUser.Lastname].filter(Boolean).join(' ') : 'Unknown';
-                      const driverUser = b.driverId ? rawUsers[b.driverId] : null;
-                      const driverName = driverUser ? [driverUser.Firstname, driverUser.Middlename, driverUser.Lastname].filter(Boolean).join(' ') : 'Unknown';
-                      return passengerName.toLowerCase().includes(query) || driverName.toLowerCase().includes(query) || b.pickup?.toLowerCase().includes(query) || b.destination?.toLowerCase().includes(query);
+                      const queryTrimmed = query.trim();
+                      const bookingIdStr = String(b.id || b.bookingIdNumeric || '');
+                      // If query is numeric, try exact ID match first
+                      if (/^\d+$/.test(queryTrimmed)) {
+                        return bookingIdStr === queryTrimmed;
+                      }
+                      // Otherwise, search by passenger, driver, pickup, destination
+                      return b.passengerName.toLowerCase().includes(query) || b.driverName.toLowerCase().includes(query) || b.pickup?.toLowerCase().includes(query) || b.destination?.toLowerCase().includes(query);
                     }).length > 0 && (
                       <div className="bg-[#1e2538] rounded-lg p-6 border border-gray-700">
                         <h3 className="text-xl font-bold text-white mb-4">Bookings ({bookings.filter(b => {
                           const query = overviewSearchQuery.toLowerCase();
-                          const passengerUser = b.userId ? rawUsers[b.userId] : (b.PassengerID ? rawPassengers[b.PassengerID]?.UserID ? rawUsers[rawPassengers[b.PassengerID]?.UserID] : null : null);
-                          const passengerName = passengerUser ? [passengerUser.Firstname, passengerUser.Middlename, passengerUser.Lastname].filter(Boolean).join(' ') : 'Unknown';
-                          const driverUser = b.driverId ? rawUsers[b.driverId] : null;
-                          const driverName = driverUser ? [driverUser.Firstname, driverUser.Middlename, driverUser.Lastname].filter(Boolean).join(' ') : 'Unknown';
-                          return passengerName.toLowerCase().includes(query) || driverName.toLowerCase().includes(query) || b.pickup?.toLowerCase().includes(query) || b.destination?.toLowerCase().includes(query);
+                          const queryTrimmed = query.trim();
+                          const bookingIdStr = String(b.id || b.bookingIdNumeric || '');
+                          if (/^\d+$/.test(queryTrimmed)) {
+                            return bookingIdStr === queryTrimmed;
+                          }
+                          return b.passengerName.toLowerCase().includes(query) || b.driverName.toLowerCase().includes(query) || b.pickup?.toLowerCase().includes(query) || b.destination?.toLowerCase().includes(query);
                         }).length})</h3>
                         <div className="space-y-2 max-h-64 overflow-y-auto">
                           {bookings.filter(b => {
                             const query = overviewSearchQuery.toLowerCase();
-                            const passengerUser = b.userId ? rawUsers[b.userId] : (b.PassengerID ? rawPassengers[b.PassengerID]?.UserID ? rawUsers[rawPassengers[b.PassengerID]?.UserID] : null : null);
-                            const passengerName = passengerUser ? [passengerUser.Firstname, passengerUser.Middlename, passengerUser.Lastname].filter(Boolean).join(' ') : 'Unknown';
-                            const driverUser = b.driverId ? rawUsers[b.driverId] : null;
-                            const driverName = driverUser ? [driverUser.Firstname, driverUser.Middlename, driverUser.Lastname].filter(Boolean).join(' ') : 'Unknown';
-                            return passengerName.toLowerCase().includes(query) || driverName.toLowerCase().includes(query) || b.pickup?.toLowerCase().includes(query) || b.destination?.toLowerCase().includes(query);
+                            const queryTrimmed = query.trim();
+                            const bookingIdStr = String(b.id || b.bookingIdNumeric || '');
+                            if (/^\d+$/.test(queryTrimmed)) {
+                              return bookingIdStr === queryTrimmed;
+                            }
+                            return b.passengerName.toLowerCase().includes(query) || b.driverName.toLowerCase().includes(query) || b.pickup?.toLowerCase().includes(query) || b.destination?.toLowerCase().includes(query);
                           }).map((b, idx) => {
-                            const passengerUser = b.userId ? rawUsers[b.userId] : (b.PassengerID ? rawPassengers[b.PassengerID]?.UserID ? rawUsers[rawPassengers[b.PassengerID]?.UserID] : null : null);
-                            const passengerName = passengerUser ? [passengerUser.Firstname, passengerUser.Middlename, passengerUser.Lastname].filter(Boolean).join(' ') : 'Unknown';
-                            const driverUser = b.driverId ? rawUsers[b.driverId] : null;
-                            const driverName = driverUser ? [driverUser.Firstname, driverUser.Middlename, driverUser.Lastname].filter(Boolean).join(' ') : 'Unknown';
                             return (
-                              <div key={idx} className="bg-[#252d42] p-3 rounded border border-gray-600">
-                                <p className="text-gray-200 text-sm"><span className="text-yellow-400">Passenger:</span> {passengerName}</p>
-                                <p className="text-gray-200 text-sm"><span className="text-green-400">Driver:</span> {driverName}</p>
+                              <div key={idx} onClick={() => setSelectedBooking(b)} className="bg-[#252d42] p-3 rounded border border-gray-600 cursor-pointer hover:border-yellow-500 transition-colors">
+                                <p className="text-gray-200 text-sm"><span className="text-yellow-400">Passenger:</span> {b.passengerName}</p>
+                                <p className="text-gray-200 text-sm"><span className="text-green-400">Driver:</span> {b.driverName}</p>
                                 <p className="text-gray-300 text-sm"><span className="text-blue-400">{b.pickup}</span> → <span className="text-blue-400">{b.destination}</span></p>
                               </div>
                             );
@@ -1885,12 +2052,28 @@
                     )}
 
                     {/* Drivers Results */}
-                    {drivers.filter(d => d.name?.toLowerCase().includes(overviewSearchQuery.toLowerCase()) || d.contact?.toLowerCase().includes(overviewSearchQuery.toLowerCase())).length > 0 && (
+                    {drivers.filter(d => {
+                      const query = overviewSearchQuery.toLowerCase();
+                      const driverName = (d.name || '').toLowerCase();
+                      const driverContact = (d.contact || '').toLowerCase();
+                      // Exact match on driver name OR partial match on contact
+                      return driverName === query || driverContact.includes(query);
+                    }).length > 0 && (
                       <div className="bg-[#1e2538] rounded-lg p-6 border border-gray-700">
-                        <h3 className="text-xl font-bold text-white mb-4">Drivers ({drivers.filter(d => d.name?.toLowerCase().includes(overviewSearchQuery.toLowerCase()) || d.contact?.toLowerCase().includes(overviewSearchQuery.toLowerCase())).length})</h3>
+                        <h3 className="text-xl font-bold text-white mb-4">Drivers ({drivers.filter(d => {
+                          const query = overviewSearchQuery.toLowerCase();
+                          const driverName = (d.name || '').toLowerCase();
+                          const driverContact = (d.contact || '').toLowerCase();
+                          return driverName === query || driverContact.includes(query);
+                        }).length})</h3>
                         <div className="space-y-2 max-h-64 overflow-y-auto">
-                          {drivers.filter(d => d.name?.toLowerCase().includes(overviewSearchQuery.toLowerCase()) || d.contact?.toLowerCase().includes(overviewSearchQuery.toLowerCase())).map((d, idx) => (
-                            <div key={idx} className="bg-[#252d42] p-3 rounded border border-gray-600">
+                          {drivers.filter(d => {
+                            const query = overviewSearchQuery.toLowerCase();
+                            const driverName = (d.name || '').toLowerCase();
+                            const driverContact = (d.contact || '').toLowerCase();
+                            return driverName === query || driverContact.includes(query);
+                          }).map((d, idx) => (
+                            <div key={idx} onClick={() => setSelectedDriver(d)} className="bg-[#252d42] p-3 rounded border border-gray-600 cursor-pointer hover:border-yellow-500 transition-colors">
                               <p className="text-gray-200 text-sm"><span className="font-semibold">{d.name}</span></p>
                               <p className="text-gray-300 text-xs">Phone: {stripPhonePrefix(d.contact)}</p>
                               <p className="text-gray-300 text-xs">Status: <span className={d.status === 'Active' ? 'text-green-400' : 'text-gray-400'}>{d.status}</span></p>
@@ -1940,8 +2123,17 @@
               <div className="space-y-6">
                 {/* Driver Management Section */}
                 <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center gap-4">
-                  <h2 className="text-2xl font-bold text-white">Driver Management ({drivers.length} drivers)</h2>
+                  <h2 className="text-2xl font-bold text-white">Driver Management ({filteredDrivers.length} drivers)</h2>
                   <div className="flex flex-col sm:flex-row gap-3 w-full sm:w-auto">
+                    <button 
+                      onClick={() => setShowDriverFilterModal(true)}
+                      className="bg-yellow-500 hover:bg-yellow-600 px-4 py-2 rounded-lg text-gray-900 font-semibold flex items-center justify-center gap-2"
+                    >
+                      <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M3 4a1 1 0 011-1h16a1 1 0 011 1v2.586a1 1 0 01-.293.707l-6.414 6.414a1 1 0 00-.293.707V17l-4 4v-6.586a1 1 0 00-.293-.707L3.293 7.293A1 1 0 013 6.586V4z" />
+                      </svg>
+                      FILTER
+                    </button>
                     <button 
                       onClick={() => setShowExportModal(true)}
                       className="bg-yellow-500 hover:bg-yellow-600 px-4 py-2 rounded-lg text-gray-900 font-semibold flex items-center justify-center gap-2"
@@ -1965,7 +2157,9 @@
 
                 <div className="bg-[#1e2538] rounded-lg overflow-hidden p-6">
                   <div className="space-y-4">
-                    {drivers.map((driver, index) => (
+                    {filteredDrivers.length > 0 ? filteredDrivers.map((driver, index) => {
+                      const originalIndex = drivers.findIndex(d => d.id === driver.id);
+                      return (
                       <div key={index} className="bg-[#252d42] rounded-lg p-6 flex flex-col sm:flex-row items-start sm:items-center gap-4 hover:shadow-lg transition-shadow">
                         <div className="flex items-center gap-4 flex-shrink-0">
                           <div className={`w-14 h-14 rounded-full flex items-center justify-center font-bold text-white text-base ${driver.status === 'Active' ? 'bg-green-500' : 'bg-gray-500'}`}>{(driver.name||'').split(' ').map(s=>s[0]).slice(0,2).join('')}</div>
@@ -1992,13 +2186,13 @@
 
                           <div className="flex gap-3 mt-3 sm:mt-0">
                             <button 
-                              onClick={() => handleEditDriver(index)}
+                              onClick={() => handleEditDriver(originalIndex)}
                               className="bg-yellow-500 hover:bg-yellow-600 h-9 min-w-[88px] px-4 rounded-lg font-semibold text-gray-900 flex items-center justify-center"
                             >
                               Edit
                             </button>
                             <button 
-                              onClick={() => handleDeleteDriver(index)}
+                              onClick={() => handleDeleteDriver(originalIndex)}
                               className="bg-red-600 hover:bg-red-700 h-9 min-w-[88px] px-4 rounded-lg font-semibold text-white flex items-center justify-center"
                             >
                               Delete
@@ -2006,7 +2200,10 @@
                           </div>
                         </div>
                       </div>
-                    ))}
+                    );
+                    }) : (
+                      <div className="text-center text-gray-400 py-8">No drivers match the selected filters</div>
+                    )}
                   </div>
                 </div>
               </div>
@@ -2030,7 +2227,7 @@
                 <div className="bg-[#1e2538] p-6 rounded-lg space-y-4">
                   {filteredBookings.length > 0 ? (
                     filteredBookings.map(booking => (
-                      <div key={booking.id} className="bg-[#252d42] p-6 rounded-lg hover:bg-[#2d3548] transition-colors">
+                      <div key={booking.id} onClick={() => setSelectedBooking(booking)} className="bg-[#252d42] p-6 rounded-lg hover:bg-[#2d3548] transition-colors cursor-pointer">
                         <div className="flex justify-between items-start">
                           <div className="flex-1">
                             <h4 className="font-bold text-white text-lg mb-2">Booking #{booking.id}</h4>
@@ -2040,11 +2237,7 @@
                             <p className="text-sm text-gray-400"><span className="font-medium text-gray-300">Date:</span> {booking.date || ''} {booking.time || ''}</p>
                           </div>
                           <div className="flex flex-col items-end gap-2">
-                            <span className={`px-4 py-2 rounded-lg text-sm font-bold ${
-                              booking.status === "Completed" ? "bg-green-600 text-white" :
-                              booking.status === "Pending" ? "bg-yellow-500 text-gray-900" :
-                              "bg-red-600 text-white"
-                            }`}>
+                            <span className={`px-4 py-2 rounded-lg text-sm font-bold ${statusBadgeClass(booking.status)}`}>
                               {booking.status}
                             </span>
                             <span className="text-xl font-bold text-yellow-500">₱{booking.fare}</span>
@@ -2519,6 +2712,63 @@
             </div>
           )}
           
+          
+          {/* Booking Details Modal */}
+          {selectedBooking && (
+            <div className="fixed inset-0 bg-black bg-opacity-60 flex justify-center items-center z-20">
+              <div className="bg-[#1a1f2e] p-6 rounded-2xl shadow-xl w-full max-w-5xl relative flex flex-col md:flex-row gap-6">
+                <button
+                  onClick={() => setSelectedBooking(null)}
+                  className="absolute top-3 right-4 text-gray-400 hover:text-white text-xl"
+                >
+                  ✕
+                </button>
+
+                {/* Booking Info */}
+                <div className="flex-1 flex flex-col justify-between">
+                  <div className="text-center md:text-left mb-4">
+                    <h3 className="text-2xl font-bold text-yellow-400">Booking #{selectedBooking.id}</h3>
+                    <span className={`inline-block mt-2 px-2 py-1 rounded text-sm font-bold ${statusBadgeClass(selectedBooking.status)}`}>
+                      {selectedBooking.status.toUpperCase()}
+                    </span>
+                  </div>
+
+                  <div className="grid grid-cols-1 md:grid-cols-2 gap-4 text-gray-300">
+                    <div className="bg-[#2a3244] p-4 rounded-lg">
+                      <p className="text-gray-400 text-sm mb-1">PASSENGER</p>
+                      <p className="text-lg font-bold">{selectedBooking.passengerName || 'Unknown'}</p>
+                    </div>
+                    <div className="bg-[#2a3244] p-4 rounded-lg">
+                      <p className="text-gray-400 text-sm mb-1">DRIVER</p>
+                      <p className="text-lg font-bold">{selectedBooking.driverName || 'Unknown'}</p>
+                    </div>
+                    <div className="bg-[#2a3244] p-4 rounded-lg">
+                      <p className="text-gray-400 text-sm mb-1">PICKUP</p>
+                      <p className="text-lg">{selectedBooking.pickup || ''}</p>
+                    </div>
+                    <div className="bg-[#2a3244] p-4 rounded-lg">
+                      <p className="text-gray-400 text-sm mb-1">DROPOFF</p>
+                      <p className="text-lg">{selectedBooking.destination || ''}</p>
+                    </div>
+                    <div className="bg-[#2a3244] p-4 rounded-lg">
+                      <p className="text-gray-400 text-sm mb-1">FARE</p>
+                      <p className="text-xl font-bold text-yellow-400">₱{selectedBooking.fare ? selectedBooking.fare.toFixed(2) : '0.00'}</p>
+                    </div>
+                    <div className="bg-[#2a3244] p-4 rounded-lg">
+                      <p className="text-gray-400 text-sm mb-1">DISTANCE</p>
+                      <p className="text-xl font-bold">{selectedBooking.distance || 'N/A'}</p>
+                    </div>
+                    <div className="bg-[#2a3244] p-4 rounded-lg">
+                      <p className="text-gray-400 text-sm mb-1">DATE & TIME</p>
+                      <p className="text-sm">{selectedBooking.date || ''}</p>
+                      <p className="text-sm">{selectedBooking.time || ''}</p>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            </div>
+          )}
+          
           {confirmDelete.open && (
             <div className="fixed inset-0 flex items-center justify-center bg-black bg-opacity-80 z-50">
               <div className="bg-[#1e2538] p-8 rounded-xl w-full max-w-md">
@@ -2527,6 +2777,92 @@
                 <div className="flex justify-end gap-3">
                   <button onClick={() => setConfirmDelete({ open: false, index: null })} className="bg-gray-600 hover:bg-gray-700 px-6 py-2 rounded-lg font-semibold text-white">Cancel</button>
                   <button onClick={() => performDeleteDriver(confirmDelete.index)} className="bg-red-600 hover:bg-red-700 px-6 py-2 rounded-lg font-semibold text-white">Delete</button>
+                </div>
+              </div>
+            </div>
+          )}
+
+          {/* Driver Filter Modal */}
+          {showDriverFilterModal && (
+            <div className="fixed inset-0 flex items-center justify-center bg-black bg-opacity-80 z-50">
+              <div className="bg-[#1e2538] p-8 rounded-xl w-full max-w-md">
+                <h2 className="text-2xl font-bold mb-6 text-white">Filter Drivers</h2>
+                
+                <div className="space-y-6">
+                  {/* Active/Inactive Filter */}
+                  <div>
+                    <h3 className="text-lg font-semibold text-white mb-3">Account Status</h3>
+                    <div className="space-y-2">
+                      <label className="flex items-center gap-3 cursor-pointer">
+                        <input
+                          type="checkbox"
+                          checked={driverStatusFilters.Active}
+                          onChange={(e) => setDriverStatusFilters({...driverStatusFilters, Active: e.target.checked})}
+                          className="w-4 h-4"
+                        />
+                        <span className="text-gray-300">Active</span>
+                      </label>
+                      <label className="flex items-center gap-3 cursor-pointer">
+                        <input
+                          type="checkbox"
+                          checked={driverStatusFilters.Inactive}
+                          onChange={(e) => setDriverStatusFilters({...driverStatusFilters, Inactive: e.target.checked})}
+                          className="w-4 h-4"
+                        />
+                        <span className="text-gray-300">Inactive</span>
+                      </label>
+                    </div>
+                  </div>
+
+                  {/* Online/Offline Filter */}
+                  <div>
+                    <h3 className="text-lg font-semibold text-white mb-3">Online Status</h3>
+                    <div className="space-y-2">
+                      <label className="flex items-center gap-3 cursor-pointer">
+                        <input
+                          type="checkbox"
+                          checked={driverOnlineFilters.Online}
+                          onChange={(e) => setDriverOnlineFilters({...driverOnlineFilters, Online: e.target.checked})}
+                          className="w-4 h-4"
+                        />
+                        <span className="text-gray-300">Online</span>
+                      </label>
+                      <label className="flex items-center gap-3 cursor-pointer">
+                        <input
+                          type="checkbox"
+                          checked={driverOnlineFilters.Offline}
+                          onChange={(e) => setDriverOnlineFilters({...driverOnlineFilters, Offline: e.target.checked})}
+                          className="w-4 h-4"
+                        />
+                        <span className="text-gray-300">Offline</span>
+                      </label>
+                    </div>
+                  </div>
+                </div>
+
+                <div className="flex justify-between gap-3 mt-8">
+                  <button
+                    onClick={() => {
+                      setDriverStatusFilters({ Active: true, Inactive: false });
+                      setDriverOnlineFilters({ Online: true, Offline: false });
+                      setShowDriverFilterModal(false);
+                    }}
+                    className="bg-gray-600 hover:bg-gray-700 px-6 py-3 rounded-lg font-semibold text-white flex-1"
+                  >
+                    Reset
+                  </button>
+                  <button
+                    onClick={() => setShowDriverFilterModal(false)}
+                    className="bg-red-600 hover:bg-red-700 px-6 py-3 rounded-lg font-semibold text-white flex-1"
+                  >
+                    Cancel
+                  </button>
+                  <button
+                    onClick={applyDriverFilters}
+                    className="bg-green-600 hover:bg-green-700 px-6 py-3 rounded-lg font-semibold text-white flex-1"
+                  >
+                    Apply
+                  </button>
                 </div>
               </div>
             </div>

@@ -127,6 +127,22 @@
   <div id="root"></div>
 
   <script type="text/babel">
+    // Helper: check if franchise expiry date has passed (includes expiry date itself)
+    const isDateExpired = (dateString) => {
+      if (!dateString) return false;
+      try {
+        const expiryDate = new Date(dateString);
+        const today = new Date();
+        // Set today to midnight to compare dates only
+        today.setHours(0, 0, 0, 0);
+        expiryDate.setHours(0, 0, 0, 0);
+        // Return true if expiry date <= today (expired on or after expiry date)
+        return expiryDate <= today;
+      } catch (e) {
+        return false;
+      }
+    };
+
     // Helper: claim smallest available numeric id atomically (reuses gaps)
     const claimSmallestNumericId = async (baseNode) => {
       if (!window.dbGet || !window.dbRef || !window.dbRunTransaction) throw new Error('DB helpers missing');
@@ -486,6 +502,14 @@
             } catch (e) {}
           }
 
+          // Validate franchise expiry date - check if expired
+          if (selected.franchiseExpiry) {
+            if (isDateExpired(selected.franchiseExpiry)) {
+              window.showAlert('Cannot save: This driver\'s franchise has expired (' + selected.franchiseExpiry + '). Please renew the franchise before saving changes.', 'error');
+              return;
+            }
+          }
+
           const payload = {
             name: selected.name,
             email: selected.email || '',
@@ -669,7 +693,15 @@
                 try { const notifRef = window.dbRef(window.db, `users/${userIdVal2}/notifications/${Date.now()}`); await window.dbSet(notifRef, { type: 'APPLICATION_STATUS_UPDATE', message: `Your application status is now ${appStatus}`, createdAt: Date.now(), seen: false }); } catch (e) { console.warn('Failed to notify user', e); }
 
                 try { const driversSnap = await window.dbGet(window.dbRef(window.db, 'drivers')); setRawDrivers(driversSnap.val() || {}); } catch(e) {}
-                try { const updatedMembers = [...members]; updatedMembers[selectedIndex] = { ...updatedMembers[selectedIndex], ...payload, status: appStatus, color: getStatusColor(appStatus) }; setMembers(updatedMembers); } catch (e) {}
+                try { 
+                  // Find the correct driver by ID instead of using selectedIndex (which may be wrong if list is filtered)
+                  const updatedMembers = [...members]; 
+                  const correctIndex = updatedMembers.findIndex(m => m.id === selected.id);
+                  if (correctIndex !== -1) {
+                    updatedMembers[correctIndex] = { ...updatedMembers[correctIndex], ...payload, status: appStatus, color: getStatusColor(appStatus) }; 
+                    setMembers(updatedMembers);
+                  }
+                } catch (e) {}
 
                 window.showAlert('Changes saved for ' + selected.name, 'success');
                 closeModal();
@@ -946,8 +978,12 @@
           const franchiseExpiry = drvEntry ? (drvEntry.rec.FranchiseExpiry || '') : '';
           const appStatus = drvEntry ? (drvEntry.rec.ApplicationStatus || drvEntry.rec.Status || 'TO REVIEW') : 'TO REVIEW';
 
-          const statusRaw = (appStatus || 'TO REVIEW').toString();
-          const status = formatStatusForDisplay(appStatus);
+          // Check if franchise has expired - override status to EXPIRED if it has
+          const franchiseHasExpired = isDateExpired(franchiseExpiry);
+          const displayStatus = franchiseHasExpired ? 'EXPIRED' : appStatus;
+
+          const statusRaw = (displayStatus || 'TO REVIEW').toString();
+          const status = formatStatusForDisplay(displayStatus);
           const initials = (name || 'Applicant').split(' ').map(n => n[0]||'').join('').slice(0,2).toUpperCase();
 
           items.push({
@@ -960,13 +996,14 @@
             license,
             plate,
             status,
-            ApplicationStatus: appStatus,
+            ApplicationStatus: displayStatus,
             Status: statusRaw,
             registeredDate: formatIsoForDisplay(userRec.CreatedAt || ''),
             franchiseExpiry,
             initials,
             color: getStatusColor(status),
-            files: drvEntry && drvEntry.rec.files ? drvEntry.rec.files : {}
+            files: drvEntry && drvEntry.rec.files ? drvEntry.rec.files : {},
+            isExpired: franchiseHasExpired
           });
         }
 
@@ -978,8 +1015,15 @@
           const contact = drv.MobileNumber || drv.contact || '';
           const license = drv.LicenseNumber || drv.license || '';
           const plate = drv.TricyclePlateNumber || drv.TricycleNumber || '';
-          const statusRaw = (drv.ApplicationStatus || drv.Status || 'TO REVIEW').toString();
-          const status = formatStatusForDisplay(drv.ApplicationStatus || drv.Status || 'TO REVIEW');
+          const franchiseExpiry = drv.FranchiseExpiry || '';
+          const appStatusRaw = drv.ApplicationStatus || drv.Status || 'TO REVIEW';
+          
+          // Check if franchise has expired
+          const franchiseHasExpired = isDateExpired(franchiseExpiry);
+          const displayStatus = franchiseHasExpired ? 'EXPIRED' : appStatusRaw;
+          
+          const statusRaw = displayStatus.toString();
+          const status = formatStatusForDisplay(displayStatus);
           const initials = (name || 'Applicant').split(' ').map(n => n[0]||'').join('').slice(0,2).toUpperCase();
           items.push({
             id: `drv-${drvId}`,
@@ -991,18 +1035,35 @@
             license,
             plate,
             status,
-            ApplicationStatus: drv.ApplicationStatus || drv.Status || 'TO REVIEW',
+            ApplicationStatus: displayStatus,
             Status: statusRaw,
             registeredDate: formatIsoForDisplay(drv.CreatedAt || ''),
-            franchiseExpiry: drv.FranchiseExpiry || '',
+            franchiseExpiry: franchiseExpiry,
             initials,
             color: getStatusColor(status),
-            files: drv.files || {}
+            files: drv.files || {},
+            isExpired: franchiseHasExpired
           });
         }
 
         setMembers(items);
       }, [rawDrivers, rawUsers]);
+
+      // Auto-expire drivers when franchise expiry date has passed
+      React.useEffect(() => {
+        if (!window.db || !window.dbRef || !window.dbUpdate || !members) return;
+        
+        members.forEach(member => {
+          if (member.isExpired && member.drvId && !member.status.includes('EXPIRED')) {
+            // Member's franchise has expired but status doesn't reflect it - update it
+            const driverRef = window.dbRef(window.db, `drivers/${member.drvId}`);
+            window.dbUpdate(driverRef, {
+              ApplicationStatus: 'EXPIRED',
+              Status: 'EXPIRED'
+            }).catch(err => console.error('Error auto-expiring member:', err));
+          }
+        });
+      }, [members]);
 
       // Audit logs state
       const [auditRawDrivers, setAuditRawDrivers] = React.useState({});
@@ -1250,7 +1311,9 @@
                               <span className="text-2xl font-bold text-gray-900">{initials.toUpperCase()}</span>
                             </div>
                             <span className={`px-3 py-1 rounded-full text-xs font-medium ${
-                              applicant.ApplicationStatus === 'APPROVED' || applicant.ApplicationStatus === 'ACTIVE'
+                              applicant.ApplicationStatus === 'EXPIRED'
+                                ? 'bg-red-900 text-red-200'
+                                : applicant.ApplicationStatus === 'APPROVED' || applicant.ApplicationStatus === 'ACTIVE'
                                 ? 'bg-green-900 text-green-200'
                                 : applicant.ApplicationStatus === 'TO REVIEW'
                                 ? 'bg-blue-900 text-blue-200'
