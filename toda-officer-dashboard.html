@@ -357,6 +357,27 @@
         return s;
       };
 
+      // Format ISO date (with time) to YYYY-MM-DD for date input field
+      const formatIsoToDateInput = (iso) => {
+        if (!iso) return '';
+        try {
+          const dateStr = iso.toString();
+          const match = dateStr.match(/^(\d{4}-\d{2}-\d{2})/);
+          if (match) return match[1];
+          // Try parsing as Date if it's ISO format
+          const d = new Date(dateStr);
+          if (!isNaN(d.getTime())) {
+            const yyyy = d.getUTCFullYear();
+            const mm = String(d.getUTCMonth() + 1).padStart(2, '0');
+            const dd = String(d.getUTCDate()).padStart(2, '0');
+            return `${yyyy}-${mm}-${dd}`;
+          }
+          return '';
+        } catch (e) {
+          return '';
+        }
+      };
+
       // Open modal for membership review (copied from Driver application behavior)
       const openModal = (index) => {
         const mem = members[index] || {};
@@ -385,7 +406,7 @@
               base.license = drv.LicenseNumber || drv.license || base.license || '';
               base.plate = drv.TricyclePlateNumber || base.plate || '';
               base.tricycleNumber = drv.TricycleNumber || base.tricycleNumber || '';
-              base.franchiseExpiry = drv.FranchiseExpiry || base.franchiseExpiry || '';
+              base.franchiseExpiry = formatIsoToDateInput(drv.FranchiseExpiry || base.franchiseExpiry || '');
               const userRec = rawUsers && rawUsers[drv.UserID];
               if (userRec) {
                 base.contact = stripPhonePrefix(userRec.MobileNumber || base.contact || '');
@@ -407,7 +428,7 @@
               base.license = drv.LicenseNumber || drv.license || base.license || '';
               base.plate = drv.TricyclePlateNumber || base.plate || '';
               base.tricycleNumber = drv.TricycleNumber || base.tricycleNumber || '';
-              base.franchiseExpiry = drv.FranchiseExpiry || drv.franchiseExpiry || base.franchiseExpiry || '';
+              base.franchiseExpiry = formatIsoToDateInput(drv.FranchiseExpiry || drv.franchiseExpiry || base.franchiseExpiry || '');
               const userRec = rawUsers && rawUsers[drv.UserID];
               if (userRec) {
                 base.contact = stripPhonePrefix(userRec.MobileNumber || base.contact || '');
@@ -532,60 +553,90 @@
               let drvRec = {};
               try {
                 const drvSnapLatest = await window.dbGet(drvRef);
-                drvRec = drvSnapLatest.exists ? drvSnapLatest.val() : drvSnapLatest.val();
+                drvRec = drvSnapLatest.exists ? drvSnapLatest.val() : {};
               } catch (e) { drvRec = rawDrivers && rawDrivers[String(drvId)] || {}; }
               const linkedUserId = drvRec && drvRec.UserID;
               
-              // First, compute what IsApplying should be
-              let newIsApplying = true;
+              // Fetch latest user record to check IsActive
+              let userObj = {};
               try {
-                if (appStatus === 'ADDED') {
-                  newIsApplying = false;
-                } else if (appStatus === 'REJECTED' || appStatus === 'EXPIRED') {
-                  newIsApplying = true;
-                } else if (typeof drvRec !== 'undefined' && typeof drvRec.IsApplying !== 'undefined') {
-                  newIsApplying = drvRec.IsApplying;
-                } else {
-                  newIsApplying = true;
+                if (linkedUserId) {
+                  const userRefCheck = window.dbRef(window.db, `users/${linkedUserId}`);
+                  const userSnapCheck = await window.dbGet(userRefCheck);
+                  userObj = userSnapCheck.exists ? userSnapCheck.val() : {};
                 }
-              } catch (e) { newIsApplying = true; }
+              } catch (e) { console.warn('Failed to fetch user record', e); }
               
-              // Now check APPROVED->ADDED with the NEW IsApplying value
+              // LOGIC: Compute final ApplicationStatus and IsApplying based on 4-case specification
               let finalAppStatus = appStatus;
+              let finalIsApplying = undefined; // Will be set based on 4-case logic
+              
               try {
-                const scheck = (appStatus || '').toString().toUpperCase();
-                if (scheck.includes('APPROVED') && linkedUserId) {
-                  try {
-                    const userRefCheck = window.dbRef(window.db, `users/${linkedUserId}`);
-                    const userSnapCheck = await window.dbGet(userRefCheck);
-                    const userObjCheck = userSnapCheck.exists ? userSnapCheck.val() : userSnapCheck.val();
-                    // Only transition to ADDED if user IsActive===true AND new IsApplying===false
-                    if (userObjCheck && userObjCheck.IsActive === true && newIsApplying === false) {
-                      finalAppStatus = 'ADDED';
-                    }
-                  } catch (e) { console.warn('Failed to check linked user Status for driver update', e); }
+                const statusStr = (appStatus || '').toString().toUpperCase();
+                
+                // CASE 1: APPROVED - transition to ADDED if IsActive=true
+                if (statusStr.includes('APPROVED')) {
+                  const isActiveTruthy = userObj && userObj.IsActive;
+                  if (isActiveTruthy) {
+                    finalAppStatus = 'ADDED';
+                    finalIsApplying = false;
+                  } else {
+                    finalAppStatus = 'APPROVED';
+                    finalIsApplying = drvRec && typeof drvRec.IsApplying !== 'undefined' ? drvRec.IsApplying : true;
+                  }
                 }
-              } catch(e) {}
+                // CASE 2: REJECTED or EXPIRED
+                else if (statusStr.includes('REJECTED') || statusStr.includes('EXPIRED')) {
+                  const isApplyingTrue = drvRec && drvRec.IsApplying === true;
+                  const isActiveFalse = userObj && userObj.IsActive === false;
+                  const isActiveTruthy = userObj && userObj.IsActive;
+                  
+                  if (isApplyingTrue && isActiveFalse) {
+                    // Keep same ApplicationStatus, IsApplying stays true
+                    finalAppStatus = appStatus;
+                    finalIsApplying = true;
+                  } else if (!isApplyingTrue && isActiveTruthy) {
+                    // IsApplying=false and IsActive=true, so set IsApplying=true
+                    finalAppStatus = appStatus;
+                    finalIsApplying = true;
+                  } else {
+                    // Keep same
+                    finalAppStatus = appStatus;
+                    finalIsApplying = drvRec && typeof drvRec.IsApplying !== 'undefined' ? drvRec.IsApplying : true;
+                  }
+                }
+                // CASE 3: TO REVIEW - only update ApplicationStatus, no IsApplying/IsActive changes
+                else if (statusStr.includes('TO REVIEW')) {
+                  finalAppStatus = 'TO REVIEW';
+                  finalIsApplying = drvRec && typeof drvRec.IsApplying !== 'undefined' ? drvRec.IsApplying : true;
+                }
+                // CASE 4: ADDED (if already marked as ADDED)
+                else if (statusStr.includes('ADDED')) {
+                  finalAppStatus = 'ADDED';
+                  finalIsApplying = false;
+                }
+                // Default fallback
+                else {
+                  finalAppStatus = appStatus;
+                  finalIsApplying = drvRec && typeof drvRec.IsApplying !== 'undefined' ? drvRec.IsApplying : true;
+                }
+              } catch(e) { 
+                console.warn('Error computing final status', e);
+                finalAppStatus = appStatus;
+                finalIsApplying = undefined;
+              }
 
               const driverUpdatePayload = { ApplicationStatus: finalAppStatus };
+              if (typeof finalIsApplying !== 'undefined') {
+                driverUpdatePayload.IsApplying = finalIsApplying;
+              }
               if (payload.license) driverUpdatePayload.LicenseNumber = payload.license;
               driverUpdatePayload.TricyclePlateNumber = payload.plate || '';
               driverUpdatePayload.TricycleNumber = payload.tricycleNumber || '';
               if (payload.franchiseExpiry) driverUpdatePayload.FranchiseExpiry = payload.franchiseExpiry;
 
-              try {
-                if (finalAppStatus === 'ADDED') {
-                  driverUpdatePayload.IsApplying = false;
-                } else if (finalAppStatus === 'REJECTED' || finalAppStatus === 'EXPIRED') {
-                  driverUpdatePayload.IsApplying = true;
-                } else if (typeof drvRec !== 'undefined' && typeof drvRec.IsApplying !== 'undefined') {
-                  driverUpdatePayload.IsApplying = drvRec.IsApplying;
-                } else {
-                  driverUpdatePayload.IsApplying = true;
-                }
-              } catch (e) { driverUpdatePayload.IsApplying = true; }
-
-              try { console.debug('saveChanges - Updating driver', drvId, 'finalAppStatus:', finalAppStatus, 'IsApplying will be:', driverUpdatePayload.IsApplying, 'full payload:', driverUpdatePayload); } catch(e) {}
+              try { console.debug('saveChanges - Updating driver (drv-id path)', drvId, 'finalAppStatus:', finalAppStatus, 'IsApplying will be:', finalIsApplying, 'full payload:', driverUpdatePayload); } catch(e) {}
+              try { console.log('DEBUG - driverUpdatePayload for drvId=' + drvId + ':', JSON.stringify(driverUpdatePayload)); } catch(e) {}
               await window.dbUpdate(drvRef, driverUpdatePayload);
               try { console.debug('saveChanges - Driver update completed for drvId:', drvId); } catch(e) {}
 
@@ -663,45 +714,91 @@
 
               if (selected.drvId) {
                 const drvKey = selected.drvId;
-                let finalApp = appStatus;
+                let finalAppStatus = appStatus;
+                let finalIsApplying = undefined; // Will be set based on 4-case logic
+                
                 try {
-                  const s2 = (appStatus || '').toString().toUpperCase();
-                  if (s2.includes('APPROVED') && userIdVal2) {
+                  const statusStr = (appStatus || '').toString().toUpperCase();
+                  
+                  // Fetch current driver and user records for conditional logic
+                  let drvRecCheck = {};
+                  let userObjCheck2 = {};
+                  try {
+                    const drvSnapLatest = await window.dbGet(window.dbRef(window.db, `drivers/${drvKey}`));
+                    drvRecCheck = drvSnapLatest.exists ? drvSnapLatest.val() : {};
+                  } catch (e) { drvRecCheck = rawDrivers && rawDrivers[String(drvKey)] || {}; }
+                  
+                  if (userIdVal2) {
                     try {
-                      const userRefCheck2 = window.dbRef(window.db, `users/${userIdVal2}`);
-                      const userSnapCheck2 = await window.dbGet(userRefCheck2);
-                      const userObjCheck2 = userSnapCheck2.exists ? userSnapCheck2.val() : userSnapCheck2.val();
-                      // Re-fetch driver record to ensure we use the latest IsApplying flag
-                      let drvRecCheck = {};
-                      try {
-                        const drvSnapLatest3 = await window.dbGet(window.dbRef(window.db, `drivers/${drvKey}`));
-                        drvRecCheck = drvSnapLatest3.exists ? drvSnapLatest3.val() : drvSnapLatest3.val();
-                      } catch (e) { drvRecCheck = rawDrivers && rawDrivers[String(drvKey)] || {}; }
-                      // Only transition to ADDED if user IsActive=true AND driver IsApplying=false
-                      if (userObjCheck2 && userObjCheck2.IsActive === true && drvRecCheck && drvRecCheck.IsApplying === false) {
-                        finalApp = 'ADDED';
-                      }
-                    } catch (e) { console.warn('Failed to check user Status for applicant->driver update', e); }
+                      const userRefCheck = window.dbRef(window.db, `users/${userIdVal2}`);
+                      const userSnapCheck = await window.dbGet(userRefCheck);
+                      userObjCheck2 = userSnapCheck.exists ? userSnapCheck.val() : {};
+                    } catch (e) { userObjCheck2 = {}; }
                   }
-                } catch (e) {}
+                  
+                  // CASE 1: APPROVED - transition to ADDED if IsActive=true
+                  if (statusStr.includes('APPROVED')) {
+                    const isActiveTruthy = userObjCheck2 && userObjCheck2.IsActive;
+                    if (isActiveTruthy) {
+                      finalAppStatus = 'ADDED';
+                      finalIsApplying = false;
+                    } else {
+                      finalAppStatus = 'APPROVED';
+                      finalIsApplying = drvRecCheck && typeof drvRecCheck.IsApplying !== 'undefined' ? drvRecCheck.IsApplying : true;
+                    }
+                  }
+                  // CASE 2: REJECTED or EXPIRED
+                  else if (statusStr.includes('REJECTED') || statusStr.includes('EXPIRED')) {
+                    const isApplyingTrue = drvRecCheck && drvRecCheck.IsApplying === true;
+                    const isActiveFalse = userObjCheck2 && userObjCheck2.IsActive === false;
+                    const isActiveTruthy = userObjCheck2 && userObjCheck2.IsActive;
+                    
+                    if (isApplyingTrue && isActiveFalse) {
+                      // Keep same ApplicationStatus, IsApplying stays true
+                      finalAppStatus = appStatus;
+                      finalIsApplying = true;
+                    } else if (!isApplyingTrue && isActiveTruthy) {
+                      // IsApplying=false and IsActive=true, so set IsApplying=true
+                      finalAppStatus = appStatus;
+                      finalIsApplying = true;
+                    } else {
+                      // Keep same
+                      finalAppStatus = appStatus;
+                      finalIsApplying = drvRecCheck && typeof drvRecCheck.IsApplying !== 'undefined' ? drvRecCheck.IsApplying : true;
+                    }
+                  }
+                  // CASE 3: TO REVIEW - only update ApplicationStatus, no IsApplying/IsActive changes
+                  else if (statusStr.includes('TO REVIEW')) {
+                    finalAppStatus = 'TO REVIEW';
+                    finalIsApplying = drvRecCheck && typeof drvRecCheck.IsApplying !== 'undefined' ? drvRecCheck.IsApplying : true;
+                  }
+                  // CASE 4: ADDED (if already marked as ADDED)
+                  else if (statusStr.includes('ADDED')) {
+                    finalAppStatus = 'ADDED';
+                    finalIsApplying = false;
+                  }
+                  // Default fallback
+                  else {
+                    finalAppStatus = appStatus;
+                    finalIsApplying = drvRecCheck && typeof drvRecCheck.IsApplying !== 'undefined' ? drvRecCheck.IsApplying : true;
+                  }
+                } catch (e) {
+                  console.warn('Error in ApplicationStatus conditional logic (applicant path):', e);
+                  finalAppStatus = appStatus;
+                  finalIsApplying = undefined;
+                }
 
-                const driverUpdate = { ApplicationStatus: finalApp };
+                const driverUpdate = { ApplicationStatus: finalAppStatus };
+                if (typeof finalIsApplying !== 'undefined') {
+                  driverUpdate.IsApplying = finalIsApplying;
+                }
                 driverUpdate.TricyclePlateNumber = payload.plate || '';
                 driverUpdate.TricycleNumber = payload.tricycleNumber || '';
                 if (payload.license) driverUpdate.LicenseNumber = payload.license;
                 if (payload.franchiseExpiry) driverUpdate.FranchiseExpiry = payload.franchiseExpiry;
-                try {
-                  if (finalApp === 'ADDED') {
-                    driverUpdate.IsApplying = false;
-                  } else if (finalApp === 'REJECTED' || finalApp === 'EXPIRED') {
-                    driverUpdate.IsApplying = true;
-                  } else if (typeof drvRecCheck !== 'undefined' && typeof drvRecCheck.IsApplying !== 'undefined') {
-                    driverUpdate.IsApplying = drvRecCheck.IsApplying;
-                  } else {
-                    driverUpdate.IsApplying = true;
-                  }
-                } catch(e) { driverUpdate.IsApplying = true; }
-                try { console.debug('saveChanges - Updating driver (applicant path)', drvKey, 'finalApp:', finalApp, 'IsApplying will be:', driverUpdate.IsApplying, 'full payload:', driverUpdate); } catch(e) {}
+                
+                try { console.debug('saveChanges - Updating driver (applicant path)', drvKey, 'finalAppStatus:', finalAppStatus, 'IsApplying will be:', finalIsApplying, 'full payload:', driverUpdate); } catch(e) {}
+                try { console.log('DEBUG - driverUpdate (applicant path) for drvKey=' + drvKey + ':', JSON.stringify(driverUpdate)); } catch(e) {}
                 await window.dbUpdate(window.dbRef(window.db, `drivers/${drvKey}`), driverUpdate);
                 try { console.debug('saveChanges - Driver update completed for drvKey:', drvKey); } catch(e) {}
 
@@ -769,8 +866,8 @@
                         const userRefCheck3 = window.dbRef(window.db, `users/${userIdVal || userIdVal2}`);
                         const userSnapCheck3 = await window.dbGet(userRefCheck3);
                         const userObjCheck3 = userSnapCheck3.exists ? userSnapCheck3.val() : userSnapCheck3.val();
-                        // Only mark as ADDED if IsApplying === false AND IsActive === true
-                        if (userObjCheck3 && userObjCheck3.IsActive === true) {
+                        // Only mark as ADDED if IsApplying === false AND IsActive is truthy
+                        if (userObjCheck3 && userObjCheck3.IsActive) {
                           // Check driver record's IsApplying flag
                           const tmpDrvSnap = await window.dbGet(window.dbRef(window.db, `drivers/${newDrvId}`));
                           // For new driver, IsApplying defaults to true, so won't be ADDED yet
@@ -1039,10 +1136,12 @@
       // Helper function for status colors (matches Driver Application)
       const getStatusColor = (status) => {
         const statusStr = (status || '').toString().toUpperCase();
+        // If ApplicationStatus contains 'ADDED', display as ADDED (blue)
         if (statusStr.includes('ADDED')) return 'bg-blue-600';
+        // Extract base status (first token before space or hyphen)
         const baseStatus = statusStr.split(/[\s\-]/)[0];
         switch(baseStatus) {
-          case 'TO REVIEW': return 'bg-yellow-500';
+          case 'TO': return 'bg-yellow-500'; // "TO REVIEW"
           case 'APPROVED': return 'bg-green-500';
           case 'EXPIRED': return 'bg-red-500';
           case 'REJECTED': return 'bg-red-500';
@@ -1568,7 +1667,7 @@
                             style={{ marginTop: '6px' }}
                             onChange={handleInputChange}
                             className="w-full px-4 py-3 rounded-lg bg-[#252d42] text-white border border-gray-700 focus:border-yellow-500 focus:outline-none"
-                          >
+                          >     
                             <option value="APPROVED">Approved</option>
                             <option value="EXPIRED">Expired</option>
                             <option value="TO REVIEW">To Review</option>

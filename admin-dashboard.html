@@ -621,7 +621,7 @@
         registeredDate: formatDateForInput(driver.registeredDate || ''),
         license: driver.license,
         tricycle: driver.tricycle,
-        franchiseExpiry: driver.franchiseExpiry || ''
+        franchiseExpiry: formatDateForInput(driver.franchiseExpiry || '')
       });
       const [editedLicenseError, setEditedLicenseError] = useState("");
 
@@ -706,7 +706,6 @@
             await window.dbUpdate(driverRef, {
               LicenseNumber: editedDriver.license,
               TricyclePlateNumber: editedDriver.tricycle,
-              TricycleNumber: editedDriver.tricycle,
               FranchiseExpiry: editedDriver.franchiseExpiry || ''
             });
           }
